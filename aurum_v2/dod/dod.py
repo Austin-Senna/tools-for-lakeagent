@@ -242,3 +242,117 @@ class DoD:
     ) -> dict:
         """Produce ``{"nodes": [...], "edges": [...]}`` for the web UI."""
         raise NotImplementedError
+
+
+# ======================================================================
+# Module-level helpers  (missing from original v2 skeleton)
+# ======================================================================
+
+
+def obtain_table_paths(
+    set_nids: dict[str, str],
+    dod: DoD,
+) -> dict[str, str]:
+    """Batch-resolve filesystem/S3 paths for a set of tables.
+
+    Port of ``DoD/data_processing_utils.obtain_table_paths``.
+
+    Parameters
+    ----------
+    set_nids : dict[str, str]
+        Mapping ``{table_name: nid}``.
+    dod : DoD
+        DoD instance whose ``api`` gives access to the store's
+        :meth:`~StoreHandler.get_path_of`.
+
+    Returns
+    -------
+    dict[str, str]
+        ``{table_name: filesystem_or_s3_path}``.
+
+    Algorithm:
+        For each (table_name, nid) pair, call
+        ``dod.api.helper.get_path_nid(nid)`` to resolve the filesystem
+        path and store it in the result dict.
+    """
+    raise NotImplementedError
+
+
+def rank_materializable_join_graphs(
+    materializable_join_paths: list,
+    table_path: dict[str, str],
+    dod: DoD,
+) -> list:
+    """Score and sort join graphs by key-likelihood quality.
+
+    Port of ``DoD/data_processing_utils.rank_materializable_join_graphs``.
+
+    Parameters
+    ----------
+    materializable_join_paths : list
+        List of materializable join paths, where each path is a list of
+        ``(left_hit, right_hit, relation)`` triples.
+    table_path : dict[str, str]
+        Mapping ``{table_name: path}`` (from :func:`obtain_table_paths`).
+    dod : DoD
+        DoD instance (used to resolve field info).
+
+    Returns
+    -------
+    list
+        The input join paths sorted **descending** by average
+        key-likelihood score.
+
+    Algorithm:
+
+    1. For each join path, iterate over hops.
+    2. For the left-side table of each hop, load the CSV and call
+       ``dpu.key_likelihood_ranking()`` to rank columns by how likely
+       they are to be join keys (high cardinality, low nulls).
+    3. Look up the join field's score in that ranking.
+    4. Average hop-scores per join graph.
+    5. Sort descending.
+
+    Caches per-table key-likelihood so each CSV is loaded at most once.
+    """
+    raise NotImplementedError
+
+
+def rank_materializable_join_paths_piece(
+    materializable_join_paths: list,
+    candidate_group: set[str],
+    table_path: dict[str, str],
+    dod: DoD,
+) -> list:
+    """Re-order join path hops by per-field key-likelihood rank.
+
+    Port of
+    ``DoD/data_processing_utils.rank_materializable_join_paths_piece``.
+
+    Parameters
+    ----------
+    materializable_join_paths : list
+        List of annotated join paths.
+    candidate_group : set[str]
+        Table names involved in this candidate group.
+    table_path : dict[str, str]
+        ``{table_name: path}``.
+    dod : DoD
+        DoD instance.
+
+    Returns
+    -------
+    list
+        Reordered join paths (same length), with hops sorted so that
+        the most key-likely fields come first.
+
+    Algorithm:
+
+    1. For each table in *candidate_group*, load CSV and compute
+       key-likelihood via ``dpu.key_likelihood_ranking(df)``.
+    2. Build per-table rank maps ``{field_name: rank_index}``.
+    3. Split each join path into per-hop buckets.
+    4. Sort each hop's bucket by the right-side field's rank.
+    5. Reassemble sorted hop buckets into complete join paths.
+    """
+    raise NotImplementedError

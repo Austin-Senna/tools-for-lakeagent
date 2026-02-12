@@ -115,6 +115,65 @@ class StoreHandler:
         """Auto‑complete suggestions for column names (ES suggest API)."""
         raise NotImplementedError
 
+    # ------------------------------------------------------------------
+    # Fuzzy / utility search  (missing from original v2 skeleton)
+    # ------------------------------------------------------------------
+
+    def fuzzy_keyword_match(
+        self, keywords: str, max_hits: int = 15
+    ) -> Iterator[Hit]:
+        """Fuzzy keyword search tolerating edit-distance typos.
+
+        Port of ``StoreHandler.fuzzy_keyword_match`` from
+        ``modelstore/elasticstore.py``.
+
+        Unlike :meth:`search_keywords` which uses an exact ``match`` query
+        and accepts a *KWType* to select the target ES index,
+        this method **always** targets the **text** index and passes
+        ``"fuzziness": "AUTO"`` in the ES match body so that near-miss
+        spelling variants still surface results.
+
+        Parameters
+        ----------
+        keywords : str
+            Search terms (e.g. ``"populaton"`` — note the typo).
+        max_hits : int
+            Maximum number of results to return.
+
+        Yields
+        ------
+        Hit
+            One :class:`Hit` per matching column, with ``score`` from ES.
+        """
+        raise NotImplementedError
+
+    def get_all_fields_with(
+        self, attrs: list[str]
+    ) -> Iterator[tuple]:
+        """Scroll the ``profile`` index returning extra attributes per field.
+
+        Port of ``StoreHandler.get_all_fields_with`` from
+        ``modelstore/elasticstore.py``.
+
+        Performs a ``match_all`` scroll over the ``profile`` index.  For
+        each document, returns a tuple of ``(nid, sourceName, columnName,
+        *attr_values)`` where *attr_values* are the ES document fields
+        named in *attrs* (e.g. ``["minhash"]``, ``["minValue",
+        "maxValue"]``).
+
+        Parameters
+        ----------
+        attrs : list[str]
+            Additional ES source-field names to retrieve alongside the
+            default ``(_id, sourceName, columnName)``.
+
+        Yields
+        ------
+        tuple
+            ``(nid, source_name, column_name, *attr_values)``.
+        """
+        raise NotImplementedError
+
     def close(self) -> None:
         """Release the ES client (placeholder)."""
         raise NotImplementedError

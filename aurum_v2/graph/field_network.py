@@ -227,6 +227,37 @@ class FieldNetwork:
         raise NotImplementedError
 
     # ------------------------------------------------------------------
+    # Degree / diagnostics
+    # ------------------------------------------------------------------
+
+    def fields_degree(self, topk: int) -> list[tuple[str, int]]:
+        """Return the *topk* highest-degree nodes in the graph.
+
+        Port of ``FieldNetwork.fields_degree`` from
+        ``knowledgerepr/fieldnetwork.py``.
+
+        Algorithm:
+
+        1. Compute the degree of every node via ``G.degree()``.
+        2. Sort by degree descending.
+        3. Return the first *topk* entries as ``(nid, degree)`` tuples.
+
+        Useful for diagnostics — high-degree columns are typically join
+        hubs (e.g. ``county``, ``state``, ``year``).
+
+        Parameters
+        ----------
+        topk : int
+            Number of top-degree nodes to return.
+
+        Returns
+        -------
+        list[tuple[str, int]]
+            ``[(nid, degree), ...]`` sorted descending by degree.
+        """
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
     # Enumeration / debug helpers
     # ------------------------------------------------------------------
 
