@@ -14,17 +14,12 @@ Direct port of ``DoD/data_processing_utils.py``.
 
 from __future__ import annotations
 
-import math
-import os
-import time
-from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING
 
 import pandas as pd
-import psutil
 
 if TYPE_CHECKING:
-    from aurum_v2.dod.dod import DoD, FilterType
+    from aurum_v2.dod.dod import DoD
 
 __all__ = [
     "configure_csv_separator",
@@ -43,7 +38,7 @@ __all__ = [
 # Module‑level state  (mirrors legacy globals)
 # ---------------------------------------------------------------------------
 
-_cache: Dict[str, pd.DataFrame] = {}
+_cache: dict[str, pd.DataFrame] = {}
 _data_separator: str = ","
 _TMP_SPILL_FILE = "./tmp_spill_file.tmp"
 
@@ -91,7 +86,7 @@ def apply_filter(
     raise NotImplementedError
 
 
-def obtain_attributes_to_project(filters: set) -> Set[str]:
+def obtain_attributes_to_project(filters: set) -> set[str]:
     """Extract the set of column names to project from filter metadata.
 
     * ``FilterType.ATTR``  → use ``info[0]`` (attribute name).
@@ -100,7 +95,7 @@ def obtain_attributes_to_project(filters: set) -> Set[str]:
     raise NotImplementedError
 
 
-def project(df: pd.DataFrame, attributes_to_project: Set[str]) -> pd.DataFrame:
+def project(df: pd.DataFrame, attributes_to_project: set[str]) -> pd.DataFrame:
     """Project *df* to the requested columns."""
     raise NotImplementedError
 
@@ -135,7 +130,7 @@ def _estimate_output_row_size(a: pd.DataFrame, b: pd.DataFrame) -> float:
 
 def _does_join_fit_in_memory(
     chunk_rows: int, ratio: float, row_size: float, memory_limit: float
-) -> Tuple[bool, float]:
+) -> tuple[bool, float]:
     """Return ``(fits, estimated_size_gb)``."""
     raise NotImplementedError
 
@@ -185,7 +180,7 @@ class InTreeNode:
         self.parent: InTreeNode | None = None
         self.payload: pd.DataFrame | None = None
 
-    def add_parent(self, parent: "InTreeNode") -> None:
+    def add_parent(self, parent: InTreeNode) -> None:
         self.parent = parent
 
     def set_payload(self, payload: pd.DataFrame) -> None:
@@ -194,7 +189,7 @@ class InTreeNode:
     def get_payload(self) -> pd.DataFrame:
         return self.payload
 
-    def get_parent(self) -> "InTreeNode | None":
+    def get_parent(self) -> InTreeNode | None:
         return self.parent
 
     def __hash__(self) -> int:
@@ -213,8 +208,8 @@ class InTreeNode:
 # ---------------------------------------------------------------------------
 
 def _build_intree(
-    jg: List[Tuple], dod: "DoD"
-) -> Tuple[dict, List[InTreeNode]]:
+    jg: list[tuple], dod: DoD
+) -> tuple[dict, list[InTreeNode]]:
     """Build an in‑tree from the join graph's pair‑hops.
 
     The tree is grown iteratively: for each ``(l, r)`` hop, whichever side
@@ -228,13 +223,13 @@ def _build_intree(
 
 def _find_l_r_key(
     l_source_name: str, r_source_name: str, jg: list
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """Resolve the join‑key field names for a given ``(l_table, r_table)`` pair."""
     raise NotImplementedError
 
 
 def materialize_join_graph(
-    jg: List[Tuple], dod: "DoD"
+    jg: list[tuple], dod: DoD
 ) -> pd.DataFrame | bool:
     """Materialise a join graph using tree‑fold strategy.
 
@@ -254,7 +249,7 @@ def materialize_join_graph(
 
 
 def materialize_join_graph_sample(
-    jg: List[Tuple], dod: "DoD", sample_size: int = 100
+    jg: list[tuple], dod: DoD, sample_size: int = 100
 ) -> pd.DataFrame | bool:
     """Like :func:`materialize_join_graph` but with consistent sampling.
 
@@ -271,7 +266,7 @@ def _apply_consistent_sample(
     a_key: str,
     b_key: str,
     sample_size: int,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Deterministic consistent‑ID sampling across two DataFrames.
 
     Picks the *sample_size* IDs with the highest hash values from whichever

@@ -7,7 +7,6 @@ Direct port of ``dataanalysis/nlp_utils.py``.
 from __future__ import annotations
 
 import re
-from typing import List
 
 __all__ = [
     "camelcase_to_snakecase",
@@ -27,7 +26,7 @@ def camelcase_to_snakecase(term: str) -> str:
     return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", tmp).lower()
 
 
-def tokenize_property(prop: str) -> List[str]:
+def tokenize_property(prop: str) -> list[str]:
     """Split a property name on camelCase / snake_case / kebab‑case boundaries.
 
     >>> tokenize_property("myField-Name")
@@ -38,7 +37,7 @@ def tokenize_property(prop: str) -> List[str]:
     return snake.split()
 
 
-def curate_tokens(tokens: List[str]) -> List[str]:
+def curate_tokens(tokens: list[str]) -> list[str]:
     """Lowercase, deduplicate, and remove short / stop‑word tokens.
 
     Stop words are loaded lazily from NLTK to avoid a hard dependency

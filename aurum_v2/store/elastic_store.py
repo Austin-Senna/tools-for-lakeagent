@@ -8,11 +8,11 @@ instead of module‑level globals.
 
 from __future__ import annotations
 
-from enum import Enum
 from collections.abc import Iterator
+from enum import Enum
 from typing import TYPE_CHECKING
 
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch  # type: ignore[import-untyped]
 
 from aurum_v2.models.hit import Hit
 

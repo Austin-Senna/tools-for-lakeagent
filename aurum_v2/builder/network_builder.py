@@ -11,20 +11,14 @@ Algorithms and thresholds are identical to the legacy
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Iterator
-from math import isinf
 from typing import TYPE_CHECKING
 
 import numpy as np
-from datasketch import MinHash, MinHashLSH
-from nearpy import Engine
-from nearpy.distances import CosineDistance
-from nearpy.hashes import RandomBinaryProjections
-from sklearn.cluster import DBSCAN
-from sklearn.feature_extraction.text import TfidfVectorizer
-
-from aurum_v2.models.relation import Relation
+from datasketch import MinHashLSH  # type: ignore[import-untyped]
+from nearpy import Engine  # type: ignore[import-untyped]
+from nearpy.distances import CosineDistance  # type: ignore[import-untyped]
+from nearpy.hashes import RandomBinaryProjections  # type: ignore[import-untyped]
 
 if TYPE_CHECKING:
     from aurum_v2.config import AurumConfig

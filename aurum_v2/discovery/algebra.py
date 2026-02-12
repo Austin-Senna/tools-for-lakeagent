@@ -11,12 +11,11 @@ legacy codebase.
 
 from __future__ import annotations
 
-import itertools
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING
 
 from aurum_v2.models.drs import DRS
-from aurum_v2.models.hit import Hit, compute_field_id
-from aurum_v2.models.relation import DRSMode, OP, Operation, Relation
+from aurum_v2.models.hit import Hit
+from aurum_v2.models.relation import Relation
 from aurum_v2.store.elastic_store import KWType
 
 if TYPE_CHECKING:
@@ -37,7 +36,7 @@ class Algebra:
         Elasticsearch connection for keyword searches and path lookups.
     """
 
-    def __init__(self, network: "FieldNetwork", store_client: "StoreHandler") -> None:
+    def __init__(self, network: FieldNetwork, store_client: StoreHandler) -> None:
         self._network = network
         self._store_client = store_client
 

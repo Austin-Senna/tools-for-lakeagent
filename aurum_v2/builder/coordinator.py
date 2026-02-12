@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 __all__ = ["build_network"]
 
 
-def build_network(config: "AurumConfig", output_path: str) -> None:
+def build_network(config: AurumConfig, output_path: str) -> None:
     """Run the complete offline network‑building pipeline.
 
     Parameters

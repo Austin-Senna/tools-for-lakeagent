@@ -9,7 +9,7 @@ Direct port of ``algebra.py::API`` / ``Helper`` and ``main.py::init_system``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 from aurum_v2.discovery.algebra import Algebra
 from aurum_v2.graph.field_network import FieldNetwork, deserialize_network
@@ -48,7 +48,7 @@ class API(Algebra):
         self.helper = Helper(network, store_client)
 
 
-def init_system(model_path: str, config: "AurumConfig | None" = None) -> API:
+def init_system(model_path: str, config: AurumConfig | None = None) -> API:
     """Load a serialised model and return a ready‑to‑use :class:`API`.
 
     Parameters

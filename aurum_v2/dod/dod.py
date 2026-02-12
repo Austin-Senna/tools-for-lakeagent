@@ -14,20 +14,18 @@ Direct port of ``DoD/dod.py``.
 
 from __future__ import annotations
 
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
+from collections.abc import Iterator
 from enum import Enum
-from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING
 
-import itertools
 import pandas as pd
 
 from aurum_v2.dod import join_utils as dpu
 from aurum_v2.models.drs import DRS
 from aurum_v2.models.hit import Hit
-from aurum_v2.models.relation import Relation
 
 if TYPE_CHECKING:
-    from aurum_v2.config import AurumConfig
     from aurum_v2.discovery.api import API
 
 __all__ = ["DoD", "FilterType"]
@@ -60,7 +58,7 @@ class DoD:
         from aurum_v2.discovery.api import API
 
         self.aurum_api: API = API(network=network, store_client=store_client)
-        self.paths_cache: Dict[Tuple[str, str], list] = {}
+        self.paths_cache: dict[tuple[str, str], list] = {}
         dpu.configure_csv_separator(csv_separator)
 
     # ------------------------------------------------------------------
@@ -71,18 +69,18 @@ class DoD:
         self.paths_cache[(t1, t2)] = paths
         self.paths_cache[(t2, t1)] = paths
 
-    def are_paths_in_cache(self, t1: str, t2: str) -> Optional[list]:
+    def are_paths_in_cache(self, t1: str, t2: str) -> list | None:
         return self.paths_cache.get((t1, t2)) or self.paths_cache.get((t2, t1))
 
     # ------------------------------------------------------------------
     # Filter construction
     # ------------------------------------------------------------------
 
-    def individual_filters(self, sch_def: dict) -> Dict[tuple, DRS]:
+    def individual_filters(self, sch_def: dict) -> dict[tuple, DRS]:
         """Obtain DRS sets that fulfil individual attribute / cell filters."""
         raise NotImplementedError
 
-    def joint_filters(self, sch_def: dict) -> Dict[tuple, DRS]:
+    def joint_filters(self, sch_def: dict) -> dict[tuple, DRS]:
         """Obtain DRS sets using joint (attribute ∩ cell) filters.
 
         If a value is empty, use attribute search only; otherwise intersect
@@ -96,12 +94,12 @@ class DoD:
 
     def virtual_schema_iterative_search(
         self,
-        list_attributes: List[str],
-        list_samples: List[str],
+        list_attributes: list[str],
+        list_samples: list[str],
         perf_stats: dict,
         max_hops: int = 2,
         debug_enumerate_all_jps: bool = False,
-    ) -> Iterator[Tuple[pd.DataFrame, set, dict]]:
+    ) -> Iterator[tuple[pd.DataFrame, set, dict]]:
         """Main DoD entry point — a generator yielding materialised views.
 
         Yields
@@ -136,7 +134,7 @@ class DoD:
         self,
         table_fulfilled_filters: OrderedDict,
         filter_drs: dict,
-    ) -> Iterator[Tuple[list, set]]:
+    ) -> Iterator[tuple[list, set]]:
         """Eagerly enumerate groups of tables covering as many filters as possible.
 
         For each pivot table, greedily add further tables that contribute new
@@ -151,10 +149,10 @@ class DoD:
 
     def joinable(
         self,
-        group_tables: List[str],
+        group_tables: list[str],
         cache_unjoinable_pairs: dict,
         max_hops: int = 2,
-    ) -> List[List[Tuple[Hit, Hit]]]:
+    ) -> list[list[tuple[Hit, Hit]]]:
         """Find all join graphs connecting *group_tables*.
 
         Algorithm:
@@ -184,7 +182,7 @@ class DoD:
 
     def transform_join_path_to_pair_hop(
         self, join_path: list
-    ) -> List[Tuple[Hit, Hit]]:
+    ) -> list[tuple[Hit, Hit]]:
         """Convert a linear provenance path into ``[(l, r), …]`` hop pairs.
 
         Pairs where both sides are in the same table are removed (no
@@ -192,7 +190,7 @@ class DoD:
         """
         raise NotImplementedError
 
-    def compute_join_graph_id(self, join_graph: List[Tuple[Hit, Hit]]) -> int:
+    def compute_join_graph_id(self, join_graph: list[tuple[Hit, Hit]]) -> int:
         """Hash a join graph for deduplication (sum of nid hashes)."""
         raise NotImplementedError
 
@@ -202,7 +200,7 @@ class DoD:
 
     def is_join_graph_materializable(
         self,
-        join_graph: List[Tuple[Hit, Hit]],
+        join_graph: list[tuple[Hit, Hit]],
         table_fulfilled_filters: dict,
     ) -> bool:
         """Validate a join graph by performing trial joins per hop.
@@ -224,8 +222,8 @@ class DoD:
 
     def materialize_join_graphs(
         self,
-        materializable_join_graphs: List[Tuple[list, set]],
-    ) -> List[Tuple[pd.DataFrame, set, dict]]:
+        materializable_join_graphs: list[tuple[list, set]],
+    ) -> list[tuple[pd.DataFrame, set, dict]]:
         """Materialise a batch of validated join graphs.
 
         For each ``(join_graph, filters)``:
@@ -240,7 +238,7 @@ class DoD:
     # ------------------------------------------------------------------
 
     def format_join_graph_into_nodes_edges(
-        self, join_graph: List[Tuple[Hit, Hit]]
+        self, join_graph: list[tuple[Hit, Hit]]
     ) -> dict:
         """Produce ``{"nodes": [...], "edges": [...]}`` for the web UI."""
         raise NotImplementedError
