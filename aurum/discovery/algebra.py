@@ -17,7 +17,6 @@ Usage::
 from __future__ import annotations
 
 import itertools
-from typing import Sequence
 
 from aurum.config import aurumConfig
 from aurum.discovery.result_set import DRS, DRSMode, Operation
@@ -123,6 +122,7 @@ class Algebra:
         """
         i_drs = self.make_drs(input_data)
         o_drs = DRS([], Operation(OP.NONE))
+        o_drs.absorb_provenance(i_drs)
         for h in i_drs:
             neighbours = self._net.neighbors_id(h, relation)
             neighbour_drs = DRS(neighbours, Operation(relation_to_op(relation), params=[h]))
@@ -160,6 +160,9 @@ class Algebra:
             max_hops = self._cfg.max_hops
 
         o_drs = DRS([], Operation(OP.NONE))
+        o_drs.absorb_provenance(a)
+        if b is not a:
+            o_drs.absorb_provenance(b)
 
         if a.mode == DRSMode.TABLE:
             # Table-level: find paths between any field of each table
@@ -211,5 +214,12 @@ def relation_to_op(relation: Relation) -> OP:
         Relation.PKFK: OP.PKFK,
         Relation.ENTITY_SIM: OP.ENTITY_SIM,
         Relation.SCHEMA: OP.TABLE,
+        Relation.INCLUSION_DEPENDENCY: OP.PKFK,  # treated as join-like
+        Relation.MEANS_SAME: OP.MEANS_SAME,
+        Relation.MEANS_DIFF: OP.MEANS_DIFF,
+        Relation.SUBCLASS: OP.SUBCLASS,
+        Relation.SUPERCLASS: OP.SUPERCLASS,
+        Relation.MEMBER: OP.MEMBER,
+        Relation.CONTAINER: OP.CONTAINER,
     }
     return mapping.get(relation, OP.NONE)

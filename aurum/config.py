@@ -26,7 +26,7 @@ class AurumConfig:
     """Immutable configuration for all aurum subsystems."""
 
     # ── MinHash / Content Similarity (text columns) ──────────────────
-    minhash_perms: int = 256
+    minhash_perms: int = 512
     """Number of MinHash permutations.  Aurum used 512; 256 is sufficient
     with modern datasketch (smaller memory, ~same accuracy)."""
 
@@ -52,15 +52,16 @@ class AurumConfig:
     join_overlap_threshold: float = 0.4
     """Minimum Jaccard-like overlap of *values* to consider two columns
     joinable (used in DoD materialisation checks)."""
+    
+    # # ── Schema Similarity ────────────────────────────────────────────
+    max_distance_schema_similarity = 10
+    # schema_sim_model: str = "all-MiniLM-L6-v2"
+    # """Sentence-transformer model for column-name embeddings.  Replaces the
+    # legacy TF-IDF + Random Binary Projections + Cosine Distance pipeline."""
 
-    # ── Schema Similarity ────────────────────────────────────────────
-    schema_sim_model: str = "all-MiniLM-L6-v2"
-    """Sentence-transformer model for column-name embeddings.  Replaces the
-    legacy TF-IDF + Random Binary Projections + Cosine Distance pipeline."""
-
-    schema_sim_threshold: float = 0.55
-    """Cosine similarity threshold for SCHEMA_SIM edges.  Tuned to
-    approximate the recall of the legacy LSH approach."""
+    # schema_sim_threshold: float = 0.55
+    # """Cosine similarity threshold for SCHEMA_SIM edges.  Tuned to
+    # approximate the recall of the legacy LSH approach."""
 
     tfidf_sublinear_tf: bool = True
     """Legacy TF-IDF used ``sublinear_tf=True`` (log-dampened TF).  Kept as
@@ -102,3 +103,7 @@ class AurumConfig:
 
     max_hops: int = 3
     """Maximum hops when searching for join paths between tables."""
+
+
+# Alias for backward compatibility with code using the lowercase name
+aurumConfig = AurumConfig

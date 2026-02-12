@@ -67,18 +67,12 @@ def build_schema_sim(
     if len(nids) == 0:
         return
 
-    try:
-        from sentence_transformers import SentenceTransformer
+ 
+    from sklearn.feature_extraction.text import TfidfVectorizer
 
-        model = SentenceTransformer(cfg.schema_sim_model)
-        embeddings = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
-    except ImportError:
-        # Fallback: TF-IDF with same params as Aurum
-        from sklearn.feature_extraction.text import TfidfVectorizer
-
-        vect = TfidfVectorizer(min_df=1, sublinear_tf=cfg.tfidf_sublinear_tf, use_idf=True)
-        tfidf = vect.fit_transform(texts)
-        embeddings = tfidf.toarray()  # dense for cosine_similarity
+    vect = TfidfVectorizer(min_df=1, sublinear_tf=cfg.tfidf_sublinear_tf, use_idf=True)
+    tfidf = vect.fit_transform(texts)
+    embeddings = tfidf.toarray()  # dense for cosine_similarity
 
     sim_matrix = cosine_similarity(embeddings)
 

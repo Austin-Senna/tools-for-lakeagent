@@ -22,21 +22,18 @@ class Relation(Enum):
     - PKFK         → primary-key / foreign-key candidate
     - INCLUSION_DEP→ one column's value range contained in another's
     """
-
-    SCHEMA = auto()
-    SCHEMA_SIM = auto()
-    CONTENT_SIM = auto()
-    ENTITY_SIM = auto()
-    PKFK = auto()
-    INCLUSION_DEPENDENCY = auto()
-
-    # ── Metadata / Annotation relations (from Aurum's ontology matcher) ──
-    MEANS_SAME = auto()
-    MEANS_DIFF = auto()
-    SUBCLASS = auto()
-    SUPERCLASS = auto()
-    MEMBER = auto()
-    CONTAINER = auto()
+    SCHEMA = 0
+    SCHEMA_SIM = 1
+    CONTENT_SIM = 2
+    ENTITY_SIM = 3
+    PKFK = 5
+    INCLUSION_DEPENDENCY = 6
+    MEANS_SAME = 10
+    MEANS_DIFF = 11
+    SUBCLASS = 12
+    SUPERCLASS = 13
+    MEMBER = 14
+    CONTAINER = 15
 
     def is_metadata(self) -> bool:
         """Return *True* for relations that come from user annotations
@@ -57,14 +54,19 @@ class OP(Enum):
     Each describes *how* a result was produced in the query algebra.
     Ported from ``apiutils.OP``.
     """
-
-    NONE = auto()
-    ORIGIN = auto()
-    KW_LOOKUP = auto()
-    SCHNAME_LOOKUP = auto()
-    SCHEMA_SIM = auto()
-    TABLE = auto()
-    CONTENT_SIM = auto()
-    PKFK = auto()
-    ENTITY_SIM = auto()
-    ENTITY_LOOKUP = auto()
+    NONE = 0  # for initial creation of DRS
+    ORIGIN = 1
+    KW_LOOKUP = 2
+    SCHNAME_LOOKUP = 3
+    SCHEMA_SIM = 4
+    TABLE = 5
+    CONTENT_SIM = 6
+    PKFK = 7
+    ENTITY_SIM = 8
+    ENTITY_LOOKUP = 9
+    MEANS_SAME = 10
+    MEANS_DIFF = 11
+    SUBCLASS = 12
+    SUPERCLASS = 13
+    MEMBER = 14
+    CONTAINER = 15

@@ -1,1 +1,1 @@
-"""LakeAgent materialization — join execution and view analysis."""
+"""Aurum materialization — join execution and view analysis."""

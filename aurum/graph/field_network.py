@@ -19,7 +19,7 @@ import pickle
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterator
-
+import binascii
 import networkx as nx
 
 from aurum.graph.relations import Relation, OP
@@ -29,6 +29,14 @@ from aurum.profiler.column_profiler import ColumnId, ColumnProfile
 # ---------------------------------------------------------------------------
 # Hit — lightweight result object (ported from apiutils.Hit namedtuple)
 # ---------------------------------------------------------------------------
+def compute_field_id(db_name, source_name, field_name):
+    string = db_name + source_name + field_name
+    nid = binascii.crc32(bytes(string, encoding="UTF-8"))
+    return str(nid)
+
+def build_hit(sn, fn):
+    nid = compute_field_id(sn, fn)
+    return Hit(nid, sn, fn, -1)
 
 class Hit:
     """A single search / traversal result.
@@ -55,13 +63,16 @@ class Hit:
 
     # Hashing / equality on nid only (same as Aurum)
     def __hash__(self) -> int:
-        return hash(self.nid)
+        return int(self.nid)
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Hit):
             return self.nid == other.nid
         return NotImplemented
 
+    def __dict__(self):
+        return self._asdict()
+    
     def __repr__(self) -> str:
         return f"Hit({self.source_name}.{self.field_name}, score={self.score:.3f})"
 
