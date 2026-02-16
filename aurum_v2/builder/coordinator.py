@@ -21,29 +21,45 @@ from typing import TYPE_CHECKING
 
 from aurum_v2.builder import network_builder
 from aurum_v2.graph.field_network import FieldNetwork, serialize_network
-from aurum_v2.store.elastic_store import StoreHandler
 from aurum_v2.utils.io_utils import serialize_object
 
 if TYPE_CHECKING:
     from aurum_v2.config import AurumConfig
+    from aurum_v2.store.duck_store import DuckStore
+    from aurum_v2.store.elastic_store import ElasticStore
 
 __all__ = ["build_network"]
 
 
-def build_network(config: AurumConfig, output_path: str) -> None:
+def build_network(
+    config: AurumConfig,
+    output_path: str,
+    *,
+    duck: DuckStore | None = None,
+    es: ElasticStore | None = None,
+) -> None:
     """Run the complete offline network‑building pipeline.
 
     Parameters
     ----------
     config : AurumConfig
-        System configuration (ES connection, thresholds, etc.).
+        System configuration (thresholds, etc.).
     output_path : str
         Directory where the serialised model artefacts will be written.
+    duck : DuckStore, optional
+        If provided, reads profiles from DuckDB.
+    es : ElasticStore, optional
+        If provided, reads profiles from Elasticsearch.
+        At least one of *duck* or *es* must be given.
     """
+    if duck is None and es is None:
+        raise ValueError("At least one store backend (duck or es) must be provided")
+
+    # Use whichever store was provided (prefer duck for zero-infra)
+    store = duck or es  # type: ignore[assignment]
     start_all = time.time()
 
     network = FieldNetwork()
-    store = StoreHandler(config)
 
     # ── Stage 1: Read all fields ──────────────────────────────────────
     fields_gen = store.get_all_fields()

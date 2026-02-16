@@ -30,9 +30,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from concurrent import futures
 import random
+import math
 
 if TYPE_CHECKING:
-    from elasticsearch import Elasticsearch
+    # from elasticsearch import Elasticsearch
 
     from aurum_v2.config import AurumConfig
     from aurum_v2.profiler.source_readers import SourceReader
@@ -129,7 +130,7 @@ def compute_kmin_hash(
                 # datasketch requires bytes, so we encode the string
                 m.update(token.encode('utf8'))
                 
-    return m.hashvalues
+    return m.hashvalues.astype(np.int64).tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -139,10 +140,9 @@ def compute_kmin_hash(
 def compute_cardinality(values: list[str]) -> int:
     """Return the approximate number of unique values.
 
-    Uses a Python set for exact cardinality (adequate for most data-lake
-    columns).  For very large columns, consider ``datasketch.HyperLogLog``.
+     For very large columns, consider ``datasketch.HyperLogLog``.
     """
-    hll = HyperLogLog(p=14) 
+    hll = HyperLogLog(p=18) 
     
     for val in values:
         hll.update(val.encode('utf-8'))
@@ -160,7 +160,9 @@ def compute_numeric_stats(values: list[str]) -> tuple[float, float, float, float
     valid_floats = []
     for v in values:
         try:
-            valid_floats.append(float(v))
+            f = float(v)
+            if math.isfinite(f):
+                valid_floats.append(f)
         except ValueError:
             pass
 
@@ -292,20 +294,22 @@ class Profiler:
     def __init__(self, config: AurumConfig) -> None:
         self._config = config
         self._profiles: list[ColumnProfile] = []
-        self._es_client: Elasticsearch | None = None
+        
+        # self._es_client: Elasticsearch | None = None
 
     # ------------------------------------------------------------------
     # ES index management  (mirrors NativeElasticStore.initStore)
     # ------------------------------------------------------------------
+    def _init_db(self, config:AurumConfig):
+        self.config = config
+    # def _init_es(self) -> None:
+    #     """Connect to Elasticsearch and create ``profile`` + ``text`` indices
+    #     with the correct mappings if they don't already exist.
 
-    def _init_es(self) -> None:
-        """Connect to Elasticsearch and create ``profile`` + ``text`` indices
-        with the correct mappings if they don't already exist.
-
-        Index mappings match the legacy ``NativeElasticStore.initStore()``
-        exactly (see audit_summary §4.3).
-        """
-        raise NotImplementedError
+    #     Index mappings match the legacy ``NativeElasticStore.initStore()``
+    #     exactly (see audit_summary §4.3).
+    #     """
+    #     raise NotImplementedError
 
     # ------------------------------------------------------------------
     # Profiling pipeline
@@ -350,7 +354,7 @@ class Profiler:
     # Store to ES
     # ------------------------------------------------------------------
 
-    def store_profiles(self) -> None:
+    def es_store_profiles(self) -> None:
         """Bulk-index all collected profiles into Elasticsearch.
 
         For each :class:`ColumnProfile`:
@@ -368,7 +372,12 @@ class Profiler:
         (``elasticsearch.helpers.bulk``).
         """
         raise NotImplementedError
-
+    
+    # ------------------------------------------------------------------
+    # Store to DuckDB
+    # ------------------------------------------------------------------
+    def db_store_profiles(self) -> None:
+        raise NotImplementedError
     # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------

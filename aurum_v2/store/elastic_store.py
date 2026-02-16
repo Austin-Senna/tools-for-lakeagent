@@ -1,179 +1,375 @@
 """
-Elasticsearch store handler — reads column profiles and performs keyword searches.
+Elasticsearch store — ingestion + retrieval for column profiles.
 
-Direct port of ``modelstore/elasticstore.py`` from the legacy codebase.
-The only change is that configuration is injected via :class:`AurumConfig`
-instead of module‑level globals.
+Provides two ES indices matching the legacy ``NativeElasticStore.java``:
+
+* **``profile``** — one doc per column (metadata + minhash + numeric stats).
+* **``text``** — one doc per column (top-k unique values for keyword search).
+
+Retrieval methods satisfy the interface expected by
+:mod:`aurum_v2.builder.coordinator` and :mod:`aurum_v2.discovery.api`.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from elasticsearch import Elasticsearch  # type: ignore[import-untyped]
+from elasticsearch.helpers import bulk  # type: ignore[import-untyped]
 
 from aurum_v2.models.hit import Hit
 
 if TYPE_CHECKING:
     from aurum_v2.config import AurumConfig
+    from aurum_v2.profiler.column_profiler import ColumnProfile
 
-__all__ = ["KWType", "StoreHandler"]
+__all__ = ["KWType", "ElasticStore"]
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Keyword‑search scope
+# Keyword-search scope
 # ---------------------------------------------------------------------------
 
 class KWType(Enum):
     """Which Elasticsearch field to query against."""
 
-    KW_CONTENT = 0      # full‑text index ("text")
-    KW_SCHEMA = 1       # column name ("profile.columnName")
-    KW_ENTITIES = 2     # entity annotations
-    KW_TABLE = 3        # table / source name
-    KW_METADATA = 4     # metadata annotations
+    KW_CONTENT = 0   # full-text index ("text")
+    KW_SCHEMA = 1    # column name  ("profile.columnName")
+    KW_ENTITIES = 2  # entity annotations
+    KW_TABLE = 3     # table / source name
 
 
 # ---------------------------------------------------------------------------
-# StoreHandler
+# Index mappings (mirrors NativeElasticStore.initStore)
 # ---------------------------------------------------------------------------
 
-class StoreHandler:
-    """Thin wrapper around an Elasticsearch client.
+_PROFILE_MAPPING: dict[str, Any] = {
+    "mappings": {
+        "properties": {
+            "id":           {"type": "keyword"},
+            "dbName":       {"type": "keyword", "index": False},
+            "path":         {"type": "keyword", "index": False},
+            "sourceName":   {"type": "text", "analyzer": "standard"},
+            "sourceNameNA": {"type": "keyword"},
+            "columnName":   {"type": "text", "analyzer": "standard"},
+            "columnNameNA": {"type": "keyword"},
+            "dataType":     {"type": "keyword"},
+            "totalValues":  {"type": "long"},
+            "uniqueValues": {"type": "long"},
+            "entities":     {"type": "keyword"},
+            "minhash":      {"type": "long"},
+            "minValue":     {"type": "double"},
+            "maxValue":     {"type": "double"},
+            "avgValue":     {"type": "double"},
+            "median":       {"type": "double"},
+            "iqr":          {"type": "double"},
+        }
+    }
+}
+
+_TEXT_MAPPING: dict[str, Any] = {
+    "mappings": {
+        "properties": {
+            "id":         {"type": "keyword"},
+            "dbName":     {"type": "keyword", "index": False},
+            "sourceName": {"type": "keyword", "index": False},
+            "columnName": {"type": "keyword", "index": False},
+            "text":       {"type": "text", "analyzer": "english"},
+        }
+    }
+}
+
+
+# ---------------------------------------------------------------------------
+# ElasticStore
+# ---------------------------------------------------------------------------
+
+class ElasticStore:
+    """Elasticsearch ingestion + retrieval for column profiles.
 
     Parameters
     ----------
     config : AurumConfig
-        System configuration carrying ``es_host`` and ``es_port``.
+        Must have ``es_host`` and ``es_port``.
     """
 
     def __init__(self, config: AurumConfig) -> None:
         self._config = config
         self._client: Elasticsearch = Elasticsearch(
-            [{"host": config.es_host, "port": config.es_port}]
+            [{"host": config.es_host, "port": int(config.es_port)}]
         )
 
-    # ------------------------------------------------------------------
-    # Field / profile retrieval (used by network‑building pipeline)
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Index management
+    # ==================================================================
+
+    def init_indices(self, *, recreate: bool = False) -> None:
+        """Create ``profile`` and ``text`` indices if they don't exist.
+
+        If *recreate* is True, existing indices are deleted first.
+        """
+        for name, mapping in [("profile", _PROFILE_MAPPING), ("text", _TEXT_MAPPING)]:
+            if recreate and self._client.indices.exists(index=name):
+                self._client.indices.delete(index=name)
+                logger.info("Deleted existing index '%s'", name)
+            if not self._client.indices.exists(index=name):
+                self._client.indices.create(index=name, body=mapping)
+                logger.info("Created index '%s'", name)
+
+    # ==================================================================
+    # Ingestion  (bulk API — called from Profiler.store_profiles)
+    # ==================================================================
+
+    def bulk_insert_profiles(
+        self,
+        profiles: list[ColumnProfile],
+        *,
+        max_text_values: int = 1_000,
+    ) -> int:
+        """Bulk-index a list of :class:`ColumnProfile` into ES.
+
+        For each profile, two documents are produced:
+
+        * A **profile document** in the ``profile`` index.
+        * A **text document** in the ``text`` index (top-k unique raw values).
+
+        Uses ``elasticsearch.helpers.bulk`` for efficient batching.
+
+        Parameters
+        ----------
+        profiles : list[ColumnProfile]
+            Completed column profiles from the profiler.
+        max_text_values : int
+            Maximum unique values stored in the ``text`` index per column.
+
+        Returns
+        -------
+        int
+            Number of actions successfully indexed.
+        """
+        actions: list[dict[str, Any]] = []
+
+        for p in profiles:
+            # -- profile doc --
+            actions.append({
+                "_index": "profile",
+                "_id": p.nid,
+                "_source": {
+                    "id":           p.nid,
+                    "dbName":       p.db_name,
+                    "path":         getattr(p, "path", ""),
+                    "sourceName":   p.source_name,
+                    "sourceNameNA": p.source_name,
+                    "columnName":   p.column_name,
+                    "columnNameNA": p.column_name,
+                    "dataType":     p.data_type,
+                    "totalValues":  p.total_values,
+                    "uniqueValues": p.unique_values,
+                    "entities":     p.entities,
+                    "minhash":      p.minhash,
+                    "minValue":     p.min_value,
+                    "maxValue":     p.max_value,
+                    "avgValue":     p.avg_value,
+                    "median":       p.median,
+                    "iqr":          p.iqr,
+                },
+            })
+
+            # -- text doc (top-k unique values for keyword search) --
+            if p.data_type == "T" and p.raw_values:
+                unique_vals = list(dict.fromkeys(p.raw_values))[:max_text_values]
+                actions.append({
+                    "_index": "text",
+                    "_id": p.nid,
+                    "_source": {
+                        "id":         p.nid,
+                        "dbName":     p.db_name,
+                        "sourceName": p.source_name,
+                        "columnName": p.column_name,
+                        "text":       " ".join(unique_vals),
+                    },
+                })
+
+        if not actions:
+            return 0
+
+        success, errors = bulk(self._client, actions, raise_on_error=False)
+        if errors:
+            logger.warning("ES bulk insert had %d errors", len(errors))
+        return success
+
+    # ==================================================================
+    # Retrieval — used by network-building pipeline
+    # ==================================================================
 
     def get_all_fields(self) -> Iterator[tuple[str, str, str, str, int, int, str]]:
-        """Scroll over all documents in the ``profile`` index.
+        """Scroll ``profile`` index.
 
-        Yields
-        ------
-        (nid, db_name, source_name, column_name, total_values, unique_values, data_type)
-            One tuple per profiled column.
+        Yields ``(nid, db_name, source_name, column_name,
+        total_values, unique_values, data_type)``.
         """
-        raise NotImplementedError
+        body: dict[str, Any] = {"query": {"match_all": {}}}
+        source_fields = [
+            "dbName", "sourceName", "columnName",
+            "totalValues", "uniqueValues", "dataType",
+        ]
+        res = self._client.search(
+            index="profile", body=body, scroll="5m",
+            size=500, _source=source_fields,
+        )
+        scroll_id = res["_scroll_id"]
+        while True:
+            hits = res["hits"]["hits"]
+            if not hits:
+                break
+            for h in hits:
+                s = h["_source"]
+                yield (
+                    h["_id"],
+                    s.get("dbName", ""),
+                    s["sourceName"],
+                    s["columnName"],
+                    s.get("totalValues", 0),
+                    s.get("uniqueValues", 0),
+                    s.get("dataType", "T"),
+                )
+            res = self._client.scroll(scroll_id=scroll_id, scroll="5m")
+            scroll_id = res["_scroll_id"]
+        self._client.clear_scroll(scroll_id=scroll_id)
 
-    def get_all_mh_text_signatures(self) -> Iterator[tuple[str, list]]:
-        """Yield ``(nid, minhash_signature_array)`` for every text column."""
-        raise NotImplementedError
+    def get_all_mh_text_signatures(self) -> list[tuple[str, list[int]]]:
+        """Return ``[(nid, minhash_array), ...]`` for all text columns."""
+        body: dict[str, Any] = {
+            "query": {"bool": {"filter": [{"term": {"dataType": "T"}}]}}
+        }
+        results: list[tuple[str, list[int]]] = []
+        res = self._client.search(
+            index="profile", body=body, scroll="5m",
+            size=500, _source=["minhash"],
+        )
+        scroll_id = res["_scroll_id"]
+        while True:
+            hits = res["hits"]["hits"]
+            if not hits:
+                break
+            for h in hits:
+                mh = h["_source"].get("minhash", [])
+                if mh:
+                    results.append((h["_id"], mh))
+            res = self._client.scroll(scroll_id=scroll_id, scroll="5m")
+            scroll_id = res["_scroll_id"]
+        self._client.clear_scroll(scroll_id=scroll_id)
+        return results
 
     def get_all_fields_num_signatures(
         self,
-    ) -> Iterator[tuple[str, tuple[float, float, float, float]]]:
-        """Yield ``(nid, (median, iqr, min_val, max_val))`` for every numeric column."""
-        raise NotImplementedError
+    ) -> list[tuple[str, tuple[float, float, float, float]]]:
+        """Return ``[(nid, (median, iqr, min_val, max_val)), ...]`` for numeric cols."""
+        body: dict[str, Any] = {
+            "query": {"bool": {"filter": [{"term": {"dataType": "N"}}]}}
+        }
+        results: list[tuple[str, tuple[float, float, float, float]]] = []
+        res = self._client.search(
+            index="profile", body=body, scroll="5m",
+            size=500, _source=["median", "iqr", "minValue", "maxValue"],
+        )
+        scroll_id = res["_scroll_id"]
+        while True:
+            hits = res["hits"]["hits"]
+            if not hits:
+                break
+            for h in hits:
+                s = h["_source"]
+                results.append((
+                    h["_id"],
+                    (s["median"], s["iqr"], s["minValue"], s["maxValue"]),
+                ))
+            res = self._client.scroll(scroll_id=scroll_id, scroll="5m")
+            scroll_id = res["_scroll_id"]
+        self._client.clear_scroll(scroll_id=scroll_id)
+        return results
 
-    # ------------------------------------------------------------------
-    # Keyword search (used by Algebra)
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Keyword search — used by Algebra / API
+    # ==================================================================
 
     def search_keywords(
-        self, keywords: str, elasticfieldname: KWType, max_hits: int = 15
+        self, keywords: str, kw_type: KWType, max_hits: int = 15,
     ) -> Iterator[Hit]:
-        """Fuzzy / relevance‑ranked keyword search.
-
-        Maps *elasticfieldname* to the correct ES index and query body,
-        then yields :class:`Hit` objects with ES ``_score``.
-        """
-        raise NotImplementedError
+        """Relevance-ranked keyword search (ES ``match`` query)."""
+        index, field = self._resolve_kw(kw_type, exact=False)
+        body: dict[str, Any] = {
+            "from": 0, "size": max_hits,
+            "query": {"match": {field: keywords}},
+        }
+        yield from self._run_kw_query(index, body)
 
     def exact_search_keywords(
-        self, keywords: str, elasticfieldname: KWType, max_hits: int = 15
+        self, keywords: str, kw_type: KWType, max_hits: int = 15,
     ) -> Iterator[Hit]:
-        """Exact‑term keyword search (uses ES ``term`` query)."""
-        raise NotImplementedError
-
-    # ------------------------------------------------------------------
-    # Miscellaneous
-    # ------------------------------------------------------------------
-
-    def get_path_of(self, nid: str) -> str:
-        """Return the filesystem path to the data source that contains *nid*.
-
-        Performs a point query on the ES ``profile`` index for the ``path``
-        field.
-        """
-        raise NotImplementedError
-
-    def suggest_schema(self, suggestion_string: str, max_hits: int = 5):
-        """Auto‑complete suggestions for column names (ES suggest API)."""
-        raise NotImplementedError
-
-    # ------------------------------------------------------------------
-    # Fuzzy / utility search  (missing from original v2 skeleton)
-    # ------------------------------------------------------------------
+        """Exact-term keyword search (ES ``term`` query)."""
+        index, field = self._resolve_kw(kw_type, exact=True)
+        body: dict[str, Any] = {
+            "from": 0, "size": max_hits,
+            "query": {"term": {field: keywords}},
+        }
+        yield from self._run_kw_query(index, body)
 
     def fuzzy_keyword_match(
-        self, keywords: str, max_hits: int = 15
+        self, keywords: str, max_hits: int = 15,
     ) -> Iterator[Hit]:
-        """Fuzzy keyword search tolerating edit-distance typos.
+        """Fuzzy keyword search on the text index."""
+        body: dict[str, Any] = {
+            "from": 0, "size": max_hits,
+            "query": {"match": {"text": {"query": keywords, "fuzziness": "AUTO"}}},
+        }
+        yield from self._run_kw_query("text", body)
 
-        Port of ``StoreHandler.fuzzy_keyword_match`` from
-        ``modelstore/elasticstore.py``.
+    # ==================================================================
+    # Internals
+    # ==================================================================
 
-        Unlike :meth:`search_keywords` which uses an exact ``match`` query
-        and accepts a *KWType* to select the target ES index,
-        this method **always** targets the **text** index and passes
-        ``"fuzziness": "AUTO"`` in the ES match body so that near-miss
-        spelling variants still surface results.
+    @staticmethod
+    def _resolve_kw(kw_type: KWType, *, exact: bool) -> tuple[str, str]:
+        """Return ``(index_name, field_name)`` for a keyword scope."""
+        if kw_type == KWType.KW_CONTENT:
+            return ("text", "text")
+        if kw_type == KWType.KW_SCHEMA:
+            return ("profile", "columnNameNA" if exact else "columnName")
+        if kw_type == KWType.KW_ENTITIES:
+            return ("profile", "entities")
+        if kw_type == KWType.KW_TABLE:
+            return ("profile", "sourceNameNA" if exact else "sourceName")
+        raise ValueError(f"Unknown KWType: {kw_type}")
 
-        Parameters
-        ----------
-        keywords : str
-            Search terms (e.g. ``"populaton"`` — note the typo).
-        max_hits : int
-            Maximum number of results to return.
-
-        Yields
-        ------
-        Hit
-            One :class:`Hit` per matching column, with ``score`` from ES.
-        """
-        raise NotImplementedError
-
-    def get_all_fields_with(
-        self, attrs: list[str]
-    ) -> Iterator[tuple]:
-        """Scroll the ``profile`` index returning extra attributes per field.
-
-        Port of ``StoreHandler.get_all_fields_with`` from
-        ``modelstore/elasticstore.py``.
-
-        Performs a ``match_all`` scroll over the ``profile`` index.  For
-        each document, returns a tuple of ``(nid, sourceName, columnName,
-        *attr_values)`` where *attr_values* are the ES document fields
-        named in *attrs* (e.g. ``["minhash"]``, ``["minValue",
-        "maxValue"]``).
-
-        Parameters
-        ----------
-        attrs : list[str]
-            Additional ES source-field names to retrieve alongside the
-            default ``(_id, sourceName, columnName)``.
-
-        Yields
-        ------
-        tuple
-            ``(nid, source_name, column_name, *attr_values)``.
-        """
-        raise NotImplementedError
+    def _run_kw_query(self, index: str, body: dict) -> Iterator[Hit]:
+        """Execute an ES search and yield Hits."""
+        filter_path = [
+            "hits.total", "hits.hits._source.id", "hits.hits._score",
+            "hits.hits._source.dbName", "hits.hits._source.sourceName",
+            "hits.hits._source.columnName",
+        ]
+        res = self._client.search(index=index, body=body, filter_path=filter_path)
+        total = res.get("hits", {}).get("total", 0)
+        if isinstance(total, dict):
+            total = total.get("value", 0)
+        if total == 0:
+            return
+        for el in res["hits"]["hits"]:
+            s = el["_source"]
+            yield Hit(
+                nid=str(s.get("id", el.get("_id", ""))),
+                db_name=s.get("dbName", ""),
+                source_name=s["sourceName"],
+                field_name=s["columnName"],
+                score=el["_score"],
+            )
 
     def close(self) -> None:
-        """Release the ES client (placeholder)."""
-        raise NotImplementedError
+        """Close the underlying transport."""
+        self._client.close()

@@ -15,7 +15,6 @@ It streams CSVs from an S3 bucket without loading the full file into memory.
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,6 +94,8 @@ class CSVReader:
         CSV delimiter.
     encoding : str
         File encoding.
+    max_text_values : int
+        Max unique text values retained per column (caps memory at reader level).
     """
 
     def __init__(
@@ -103,22 +104,17 @@ class CSVReader:
         directory: str | Path,
         separator: str = ",",
         encoding: str = "utf-8",
+        max_text_values: int = 1_000,
     ) -> None:
         self.db_name = db_name
         self.directory = Path(directory)
         self.separator = separator
         self.encoding = encoding
+        self.max_text_values = max_text_values
 
     def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str]]]:
         """Yield ``(db_name, table_name, column_name, aurum_type, values)`` for every column
         in every CSV file under :attr:`directory`.
-
-        Algorithm (mirrors legacy ``CSVSource``):
-
-        1. Glob all ``*.csv`` files in the directory.
-        2. For each file, read into a pandas DataFrame in chunks.
-        3. For each column, coerce all values to strings, drop NaN,
-           and yield the quadruple.
         """
         csv_files = sorted(self.directory.glob("*.csv"))
         if not csv_files:
@@ -134,7 +130,7 @@ class CSVReader:
                     sep=self.separator,
                     encoding=self.encoding,
                     low_memory=True,
-                    chunksize=100_000
+                    chunksize=100_000,
                 )
             except Exception:
                 logger.exception("Failed to read %s", csv_path)
@@ -190,7 +186,10 @@ class DatabaseReader:
         con.execute(f"ATTACH '{self.connection_string}' AS remote_db (TYPE {self.db_type});")
 
         # 4. Get all table names from the attached database
-        tables_query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+        tables_query = (
+            "SELECT table_name FROM information_schema.tables"
+            " WHERE table_schema = 'public'"
+        )
         tables = [row[0] for row in con.execute(tables_query).fetchall()]
 
         for table_name in tables:
@@ -214,15 +213,20 @@ class DatabaseReader:
 # ---------------------------------------------------------------------------
 
 class S3Reader:
-    """
-    Simple S3 reader that processes an explicit list of S3 file paths
-    using DuckDB's native S3 + httpfs support.
+    """S3 reader using DuckDB's native httpfs + Bernoulli sampling.
 
-    Example manifest:
-        [
-            "s3://my-bucket/data/table1.csv",
-            "s3://my-bucket/data/table2.csv",
-        ]
+    Parameters
+    ----------
+    db_name : str
+        Logical database name.
+    s3_paths : list[str]
+        Explicit list of ``s3://`` URIs to profile.
+    region : str
+        AWS region.
+    sample_rows : int
+        Number of rows to Bernoulli-sample per file (default 10_000).
+    max_text_values : int
+        Max unique text values retained per column.
     """
 
     def __init__(
@@ -230,12 +234,14 @@ class S3Reader:
         db_name: str,
         s3_paths: list[str],
         region: str = "us-east-2",
-        sample_rows: int | None = None,
+        sample_rows: int = 10_000,
+        max_text_values: int = 1_000,
     ) -> None:
         self.db_name = db_name
         self.s3_paths = s3_paths
         self.region = region
         self.sample_rows = sample_rows
+        self.max_text_values = max_text_values
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
         con = duckdb.connect()
@@ -253,26 +259,22 @@ class S3Reader:
 
         for path in self.s3_paths:
             table_name = self._table_name_from_path(path)
-
             logger.info("Reading %s", path)
 
             try:
-                df = con.execute(
-                "SELECT * FROM read_csv_auto(?)" + 
-                (" LIMIT ?" if self.sample_rows else ""),
-                [path] + ([self.sample_rows] if self.sample_rows else [])
-                ).df()
-
+                query = (
+                    f"SELECT * FROM read_csv_auto(?)"
+                    f" USING SAMPLE {self.sample_rows} ROWS (bernoulli)"
+                )
+                df = con.execute(query, [path]).df()
             except Exception:
                 logger.exception("Failed to read %s", path)
                 continue
 
             for col_name in df.columns:
                 series = df[col_name]
-
                 is_numeric = pd.api.types.is_numeric_dtype(series.dtype)
                 aurum_type = "N" if is_numeric else "T"
-
                 values = series.dropna().astype(str).tolist()
 
                 yield (
@@ -311,9 +313,10 @@ def discover_sources(configs: list[SourceConfig]) -> list[SourceReader]:
                     db_name=cfg.name,
                     s3_paths=cfg.config["s3_paths"],
                     region=cfg.config.get("region", "us-east-2"),
-                    sample_rows=cfg.config.get("sample_rows"),
-        )
-    )
+                    sample_rows=cfg.config.get("sample_rows", 10_000),
+                    max_text_values=cfg.config.get("max_text_values", 1_000),
+                )
+            )
         elif cfg.source_type in ("postgres", "mysql", "sqlserver", "hive"):
             readers.append(
                 DatabaseReader(

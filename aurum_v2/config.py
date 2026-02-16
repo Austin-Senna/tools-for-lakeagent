@@ -44,7 +44,14 @@ class AurumConfig:
     # --- Spacy Entity Recognition -----
     spacy_model: str = "en_core_web_sm"
     spacy_size: int = 1000
-    
+
+    # ── Text index limits ──────────────────────────────────────────────
+    max_text_values: int = 1_000
+    """Max unique values stored per column in the keyword search index."""
+
+    # ── DuckDB ─────────────────────────────────────────────────────────
+    duckdb_path: str = "aurum.db"
+
     # ── Serialisation paths ────────────────────────────────────────────
     graph_filename: str = "graph.pickle"
     id_info_filename: str = "id_info.pickle"
