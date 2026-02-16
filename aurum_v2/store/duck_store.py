@@ -1,179 +1,380 @@
 """
-Elasticsearch store handler — reads column profiles and performs keyword searches.
+DuckDB store — embedded ingestion + retrieval for column profiles.
 
-Direct port of ``modelstore/elasticstore.py`` from the legacy codebase.
-The only change is that configuration is injected via :class:`AurumConfig`
-instead of module‑level globals.
+Replaces Elasticsearch with a single ``.db`` file using DuckDB native
+Full-Text Search (FTS) extension. No JVM, no server, no infrastructure.
+
+Schema mirrors the legacy ES indices:
+
+* **``profile``** table — one row per column (metadata + minhash + numeric stats).
+* **``text_index``** table — one row per column (top-k unique values for FTS).
+
+**Single-writer constraint**: DuckDB allows only one concurrent writer.
+All inserts must go through the main thread (never from multiprocessing
+workers). The :meth:`bulk_insert_profiles` method handles this.
 """
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from collections.abc import Iterator
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from elasticsearch import Elasticsearch  # type: ignore[import-untyped]
+import duckdb
 
 from aurum_v2.models.hit import Hit
 
 if TYPE_CHECKING:
     from aurum_v2.config import AurumConfig
+    from aurum_v2.profiler.column_profiler import ColumnProfile
 
-__all__ = ["KWType", "StoreHandler"]
+__all__ = ["KWType", "DuckStore"]
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Keyword‑search scope
+# Keyword-search scope (shared enum with ElasticStore for API compat)
 # ---------------------------------------------------------------------------
 
 class KWType(Enum):
-    """Which Elasticsearch field to query against."""
+    """Which field to query against."""
 
-    KW_CONTENT = 0      # full‑text index ("text")
-    KW_SCHEMA = 1       # column name ("profile.columnName")
-    KW_ENTITIES = 2     # entity annotations
-    KW_TABLE = 3        # table / source name
-    KW_METADATA = 4     # metadata annotations
+    KW_CONTENT = 0   # FTS on text_index.text
+    KW_SCHEMA = 1    # column name
+    KW_ENTITIES = 2  # entity annotations
+    KW_TABLE = 3     # table / source name
 
 
 # ---------------------------------------------------------------------------
-# StoreHandler
+# DDL
 # ---------------------------------------------------------------------------
 
-class StoreHandler:
-    """Thin wrapper around an Elasticsearch client.
+_CREATE_PROFILE = """
+CREATE TABLE IF NOT EXISTS profile (
+    nid           VARCHAR PRIMARY KEY,
+    db_name       VARCHAR,
+    path          VARCHAR DEFAULT '',
+    source_name   VARCHAR NOT NULL,
+    column_name   VARCHAR NOT NULL,
+    data_type     VARCHAR NOT NULL,   -- 'T' or 'N'
+    total_values  BIGINT  DEFAULT 0,
+    unique_values BIGINT  DEFAULT 0,
+    entities      VARCHAR DEFAULT '',
+    minhash       BIGINT[],           -- k=512 hash values
+    min_value     DOUBLE  DEFAULT 0,
+    max_value     DOUBLE  DEFAULT 0,
+    avg_value     DOUBLE  DEFAULT 0,
+    median        DOUBLE  DEFAULT 0,
+    iqr           DOUBLE  DEFAULT 0
+);
+"""
+
+_CREATE_TEXT_INDEX = """
+CREATE TABLE IF NOT EXISTS text_index (
+    nid         VARCHAR PRIMARY KEY,
+    db_name     VARCHAR,
+    source_name VARCHAR,
+    column_name VARCHAR,
+    text        VARCHAR          -- top-k unique values joined by space
+);
+"""
+
+
+# ---------------------------------------------------------------------------
+# DuckStore
+# ---------------------------------------------------------------------------
+
+class DuckStore:
+    """Embedded DuckDB store for column profiles + FTS keyword search.
 
     Parameters
     ----------
     config : AurumConfig
-        System configuration carrying ``es_host`` and ``es_port``.
+        System configuration.
+    db_path : str | Path
+        Path to the ``.db`` file. Use ``":memory:"`` for testing.
     """
 
-    def __init__(self, config: AurumConfig) -> None:
+    def __init__(self, config: AurumConfig, db_path: str | Path = "aurum.db") -> None:
         self._config = config
-        self._client: Elasticsearch = Elasticsearch(
-            [{"host": config.es_host, "port": config.es_port}]
-        )
+        self._db_path = str(db_path)
+        self._con: duckdb.DuckDBPyConnection = duckdb.connect(self._db_path)
 
-    # ------------------------------------------------------------------
-    # Field / profile retrieval (used by network‑building pipeline)
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Schema management
+    # ==================================================================
+
+    def init_tables(self, *, recreate: bool = False) -> None:
+        """Create ``profile`` and ``text_index`` tables + FTS index.
+
+        If *recreate* is True, existing tables are dropped first.
+        """
+        if recreate:
+            self._con.execute("DROP TABLE IF EXISTS text_index;")
+            self._con.execute("DROP TABLE IF EXISTS profile;")
+            logger.info("Dropped existing DuckDB tables")
+
+        self._con.execute(_CREATE_PROFILE)
+        self._con.execute(_CREATE_TEXT_INDEX)
+        logger.info("DuckDB tables ready at %s", self._db_path)
+
+    def _rebuild_fts(self) -> None:
+        """(Re)create the FTS index on ``text_index.text``.
+
+        Must be called after bulk inserts — DuckDB FTS indexes are not
+        automatically updated on INSERT.
+        """
+        self._con.execute("INSTALL fts; LOAD fts;")
+        # Drop existing FTS index if present
+        with contextlib.suppress(duckdb.CatalogException):
+            self._con.execute("PRAGMA drop_fts_index('text_index');")
+        self._con.execute(
+            "PRAGMA create_fts_index("
+            "  'text_index', 'nid', 'text', 'column_name', 'source_name',"
+            "  stemmer='english', stopwords='english'"
+            ");"
+        )
+        logger.info("FTS index rebuilt on text_index")
+
+    # ==================================================================
+    # Ingestion  (single-writer — call from main thread only)
+    # ==================================================================
+
+    def bulk_insert_profiles(
+        self,
+        profiles: list[ColumnProfile],
+        *,
+        max_text_values: int = 1_000,
+    ) -> int:
+        """Insert profiles into ``profile`` and ``text_index`` tables.
+
+        **Must be called from the main thread** — DuckDB only supports a
+        single concurrent writer.
+
+        Uses DuckDB ``INSERT OR REPLACE`` via ``executemany`` for efficient
+        batched writes.
+
+        Parameters
+        ----------
+        profiles : list[ColumnProfile]
+            Column profiles gathered by the Profiler.
+        max_text_values : int
+            Max unique values stored per column in the text index.
+
+        Returns
+        -------
+        int
+            Number of profiles inserted.
+        """
+        if not profiles:
+            return 0
+
+        profile_rows = []
+        text_rows = []
+
+        for p in profiles:
+            profile_rows.append((
+                p.nid,
+                p.db_name,
+                getattr(p, "path", ""),
+                p.source_name,
+                p.column_name,
+                p.data_type,
+                p.total_values,
+                p.unique_values,
+                p.entities,
+                p.minhash,          # DuckDB BIGINT[] accepts list[int]
+                p.min_value,
+                p.max_value,
+                p.avg_value,
+                p.median,
+                p.iqr,
+            ))
+
+            if p.data_type == "T" and p.raw_values:
+                unique_vals = list(dict.fromkeys(p.raw_values))[:max_text_values]
+                text_rows.append((
+                    p.nid,
+                    p.db_name,
+                    p.source_name,
+                    p.column_name,
+                    " ".join(unique_vals),
+                ))
+
+        self._con.execute("BEGIN TRANSACTION;")
+        try:
+            self._con.executemany(
+                """INSERT OR REPLACE INTO profile
+                   (nid, db_name, path, source_name, column_name, data_type,
+                    total_values, unique_values, entities, minhash,
+                    min_value, max_value, avg_value, median, iqr)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                profile_rows,
+            )
+            if text_rows:
+                self._con.executemany(
+                    """INSERT OR REPLACE INTO text_index
+                       (nid, db_name, source_name, column_name, text)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    text_rows,
+                )
+            self._con.execute("COMMIT;")
+        except Exception:
+            self._con.execute("ROLLBACK;")
+            raise
+
+        # Rebuild FTS after bulk load
+        self._rebuild_fts()
+
+        logger.info(
+            "Inserted %d profile rows, %d text rows into DuckDB",
+            len(profile_rows), len(text_rows),
+        )
+        return len(profile_rows)
+
+    # ==================================================================
+    # Retrieval — used by network-building pipeline
+    # ==================================================================
 
     def get_all_fields(self) -> Iterator[tuple[str, str, str, str, int, int, str]]:
-        """Scroll over all documents in the ``profile`` index.
+        """Scan ``profile`` table.
 
-        Yields
-        ------
-        (nid, db_name, source_name, column_name, total_values, unique_values, data_type)
-            One tuple per profiled column.
+        Yields ``(nid, db_name, source_name, column_name,
+        total_values, unique_values, data_type)``.
         """
-        raise NotImplementedError
+        rows = self._con.execute(
+            "SELECT nid, db_name, source_name, column_name,"
+            "       total_values, unique_values, data_type"
+            "  FROM profile"
+        ).fetchall()
+        yield from rows  # type: ignore[misc]
 
-    def get_all_mh_text_signatures(self) -> Iterator[tuple[str, list]]:
-        """Yield ``(nid, minhash_signature_array)`` for every text column."""
-        raise NotImplementedError
+    def get_all_mh_text_signatures(self) -> list[tuple[str, list[int]]]:
+        """Return ``[(nid, minhash_array), ...]`` for all text columns."""
+        rows = self._con.execute(
+            "SELECT nid, minhash FROM profile"
+            " WHERE data_type = 'T' AND minhash IS NOT NULL"
+        ).fetchall()
+        results: list[tuple[str, list[int]]] = []
+        for nid, mh in rows:
+            if mh:
+                results.append((nid, list(mh)))
+        return results
 
     def get_all_fields_num_signatures(
         self,
-    ) -> Iterator[tuple[str, tuple[float, float, float, float]]]:
-        """Yield ``(nid, (median, iqr, min_val, max_val))`` for every numeric column."""
-        raise NotImplementedError
+    ) -> list[tuple[str, tuple[float, float, float, float]]]:
+        """Return ``[(nid, (median, iqr, min_val, max_val)), ...]`` for numeric cols."""
+        rows = self._con.execute(
+            "SELECT nid, median, iqr, min_value, max_value"
+            "  FROM profile WHERE data_type = 'N'"
+        ).fetchall()
+        return [(nid, (med, iq, mn, mx)) for nid, med, iq, mn, mx in rows]
 
-    # ------------------------------------------------------------------
-    # Keyword search (used by Algebra)
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Keyword search — DuckDB FTS (used by Algebra / API)
+    # ==================================================================
 
     def search_keywords(
-        self, keywords: str, elasticfieldname: KWType, max_hits: int = 15
+        self, keywords: str, kw_type: KWType, max_hits: int = 15,
     ) -> Iterator[Hit]:
-        """Fuzzy / relevance‑ranked keyword search.
-
-        Maps *elasticfieldname* to the correct ES index and query body,
-        then yields :class:`Hit` objects with ES ``_score``.
-        """
-        raise NotImplementedError
+        """Relevance-ranked keyword search via DuckDB FTS or ILIKE."""
+        if kw_type == KWType.KW_CONTENT:
+            yield from self._fts_search(keywords, max_hits)
+        elif kw_type == KWType.KW_SCHEMA:
+            yield from self._profile_like_search("column_name", keywords, max_hits)
+        elif kw_type == KWType.KW_ENTITIES:
+            yield from self._profile_like_search("entities", keywords, max_hits)
+        elif kw_type == KWType.KW_TABLE:
+            yield from self._profile_like_search("source_name", keywords, max_hits)
 
     def exact_search_keywords(
-        self, keywords: str, elasticfieldname: KWType, max_hits: int = 15
+        self, keywords: str, kw_type: KWType, max_hits: int = 15,
     ) -> Iterator[Hit]:
-        """Exact‑term keyword search (uses ES ``term`` query)."""
-        raise NotImplementedError
+        """Exact-match keyword search."""
+        if kw_type == KWType.KW_CONTENT:
+            rows = self._con.execute(
+                "SELECT t.nid, p.db_name, p.source_name, p.column_name"
+                "  FROM text_index t"
+                "  JOIN profile p ON t.nid = p.nid"
+                " WHERE t.text LIKE ?"
+                " LIMIT ?",
+                [f"% {keywords} %", max_hits],
+            ).fetchall()
+        elif kw_type == KWType.KW_SCHEMA:
+            rows = self._con.execute(
+                "SELECT nid, db_name, source_name, column_name"
+                "  FROM profile WHERE column_name = ? LIMIT ?",
+                [keywords, max_hits],
+            ).fetchall()
+        elif kw_type == KWType.KW_ENTITIES:
+            rows = self._con.execute(
+                "SELECT nid, db_name, source_name, column_name"
+                "  FROM profile WHERE entities LIKE ? LIMIT ?",
+                [f"%{keywords}%", max_hits],
+            ).fetchall()
+        elif kw_type == KWType.KW_TABLE:
+            rows = self._con.execute(
+                "SELECT nid, db_name, source_name, column_name"
+                "  FROM profile WHERE source_name = ? LIMIT ?",
+                [keywords, max_hits],
+            ).fetchall()
+        else:
+            return
 
-    # ------------------------------------------------------------------
-    # Miscellaneous
-    # ------------------------------------------------------------------
-
-    def get_path_of(self, nid: str) -> str:
-        """Return the filesystem path to the data source that contains *nid*.
-
-        Performs a point query on the ES ``profile`` index for the ``path``
-        field.
-        """
-        raise NotImplementedError
-
-    def suggest_schema(self, suggestion_string: str, max_hits: int = 5):
-        """Auto‑complete suggestions for column names (ES suggest API)."""
-        raise NotImplementedError
-
-    # ------------------------------------------------------------------
-    # Fuzzy / utility search  (missing from original v2 skeleton)
-    # ------------------------------------------------------------------
+        for nid, db, src, col in rows:
+            yield Hit(nid=nid, db_name=db, source_name=src,
+                      field_name=col, score=1.0)
 
     def fuzzy_keyword_match(
-        self, keywords: str, max_hits: int = 15
+        self, keywords: str, max_hits: int = 15,
     ) -> Iterator[Hit]:
-        """Fuzzy keyword search tolerating edit-distance typos.
+        """Fuzzy keyword search on text_index (FTS stemming handles most cases)."""
+        yield from self._fts_search(keywords, max_hits)
 
-        Port of ``StoreHandler.fuzzy_keyword_match`` from
-        ``modelstore/elasticstore.py``.
+    # ==================================================================
+    # Internals
+    # ==================================================================
 
-        Unlike :meth:`search_keywords` which uses an exact ``match`` query
-        and accepts a *KWType* to select the target ES index,
-        this method **always** targets the **text** index and passes
-        ``"fuzziness": "AUTO"`` in the ES match body so that near-miss
-        spelling variants still surface results.
+    def _fts_search(self, keywords: str, max_hits: int) -> Iterator[Hit]:
+        """Run a DuckDB FTS query against the ``text_index`` table."""
+        try:
+            rows = self._con.execute(
+                "SELECT t.nid, p.db_name, p.source_name, p.column_name,"
+                "       fts_main_text_index.match_bm25(t.nid, ?) AS score"
+                "  FROM text_index t"
+                "  JOIN profile p ON t.nid = p.nid"
+                " WHERE score IS NOT NULL"
+                " ORDER BY score DESC"
+                " LIMIT ?",
+                [keywords, max_hits],
+            ).fetchall()
+        except duckdb.Error as e:
+            logger.warning("FTS query failed: %s", e)
+            return
+        for nid, db, src, col, score in rows:
+            yield Hit(nid=nid, db_name=db, source_name=src,
+                      field_name=col, score=float(score))
 
-        Parameters
-        ----------
-        keywords : str
-            Search terms (e.g. ``"populaton"`` — note the typo).
-        max_hits : int
-            Maximum number of results to return.
-
-        Yields
-        ------
-        Hit
-            One :class:`Hit` per matching column, with ``score`` from ES.
-        """
-        raise NotImplementedError
-
-    def get_all_fields_with(
-        self, attrs: list[str]
-    ) -> Iterator[tuple]:
-        """Scroll the ``profile`` index returning extra attributes per field.
-
-        Port of ``StoreHandler.get_all_fields_with`` from
-        ``modelstore/elasticstore.py``.
-
-        Performs a ``match_all`` scroll over the ``profile`` index.  For
-        each document, returns a tuple of ``(nid, sourceName, columnName,
-        *attr_values)`` where *attr_values* are the ES document fields
-        named in *attrs* (e.g. ``["minhash"]``, ``["minValue",
-        "maxValue"]``).
-
-        Parameters
-        ----------
-        attrs : list[str]
-            Additional ES source-field names to retrieve alongside the
-            default ``(_id, sourceName, columnName)``.
-
-        Yields
-        ------
-        tuple
-            ``(nid, source_name, column_name, *attr_values)``.
-        """
-        raise NotImplementedError
+    def _profile_like_search(
+        self, field: str, keywords: str, max_hits: int,
+    ) -> Iterator[Hit]:
+        """ILIKE search on a profile column."""
+        rows = self._con.execute(
+            f"SELECT nid, db_name, source_name, column_name"
+            f"  FROM profile"
+            f" WHERE {field} ILIKE ?"
+            f" LIMIT ?",
+            [f"%{keywords}%", max_hits],
+        ).fetchall()
+        for nid, db, src, col in rows:
+            yield Hit(nid=nid, db_name=db, source_name=src,
+                      field_name=col, score=1.0)
 
     def close(self) -> None:
-        """Release the ES client (placeholder)."""
-        raise NotImplementedError
+        """Close the DuckDB connection."""
+        self._con.close()

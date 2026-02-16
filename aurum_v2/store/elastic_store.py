@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from elasticsearch import Elasticsearch  # type: ignore[import-untyped]
 from elasticsearch.helpers import bulk  # type: ignore[import-untyped]
+from elasticsearch import helpers
 
 from aurum_v2.models.hit import Hit
 
@@ -113,7 +114,8 @@ class ElasticStore:
 
         If *recreate* is True, existing indices are deleted first.
         """
-        for name, mapping in [("profile", _PROFILE_MAPPING), ("text", _TEXT_MAPPING)]:
+        for name, mapping in [("profile", _PROFILE_MAPPING),
+                               ("text", _TEXT_MAPPING)]:
             if recreate and self._client.indices.exists(index=name):
                 self._client.indices.delete(index=name)
                 logger.info("Deleted existing index '%s'", name)
@@ -136,7 +138,7 @@ class ElasticStore:
         For each profile, two documents are produced:
 
         * A **profile document** in the ``profile`` index.
-        * A **text document** in the ``text`` index (top-k unique raw values).
+        * A **text document** in the ``text`` index (top-k unique values).
 
         Uses ``elasticsearch.helpers.bulk`` for efficient batching.
 
@@ -208,91 +210,51 @@ class ElasticStore:
     # ==================================================================
 
     def get_all_fields(self) -> Iterator[tuple[str, str, str, str, int, int, str]]:
-        """Scroll ``profile`` index.
-
-        Yields ``(nid, db_name, source_name, column_name,
-        total_values, unique_values, data_type)``.
-        """
-        body: dict[str, Any] = {"query": {"match_all": {}}}
+        """Scroll ``profile`` index using memory-safe generators."""
+        query = {"query": {"match_all": {}}}
         source_fields = [
             "dbName", "sourceName", "columnName",
             "totalValues", "uniqueValues", "dataType",
         ]
-        res = self._client.search(
-            index="profile", body=body, scroll="5m",
-            size=500, _source=source_fields,
-        )
-        scroll_id = res["_scroll_id"]
-        while True:
-            hits = res["hits"]["hits"]
-            if not hits:
-                break
-            for h in hits:
-                s = h["_source"]
-                yield (
-                    h["_id"],
-                    s.get("dbName", ""),
-                    s["sourceName"],
-                    s["columnName"],
-                    s.get("totalValues", 0),
-                    s.get("uniqueValues", 0),
-                    s.get("dataType", "T"),
+        
+        for doc in helpers.scan(self._client, index="profile", query=query, _source=source_fields):
+            s = doc.get("_source", {})
+            yield (
+                doc["_id"],
+                s.get("dbName", ""),
+                s.get("sourceName", ""),
+                s.get("columnName", ""),
+                s.get("totalValues", 0),
+                s.get("uniqueValues", 0),
+                s.get("dataType", "T"),
+            )
+
+    def get_all_mh_text_signatures(self) -> Iterator[tuple[str, list[int]]]:
+        """Yield ``(nid, minhash_array)`` for all text columns."""
+        query = {"query": {"term": {"dataType": "T"}}}
+        
+        for doc in helpers.scan(self._client, index="profile", query=query, _source=["minhash"]):
+            s = doc.get("_source", {})
+            mh = s.get("minhash", [])
+            if mh:
+                yield (doc["_id"], mh)
+
+    def get_all_fields_num_signatures(self) -> Iterator[tuple[str, tuple[float, float, float, float]]]:
+        """Yield ``(nid, (median, iqr, min_val, max_val))`` for numeric cols safely."""
+        query = {"query": {"term": {"dataType": "N"}}}
+        source_fields = ["median", "iqr", "minValue", "maxValue"]
+        
+        for doc in helpers.scan(self._client, index="profile", query=query, _source=source_fields):
+            s = doc.get("_source", {})
+            yield (
+                doc["_id"],
+                (
+                    float(s.get("median", 0.0)),
+                    float(s.get("iqr", 0.0)),
+                    float(s.get("minValue", 0.0)),
+                    float(s.get("maxValue", 0.0)),
                 )
-            res = self._client.scroll(scroll_id=scroll_id, scroll="5m")
-            scroll_id = res["_scroll_id"]
-        self._client.clear_scroll(scroll_id=scroll_id)
-
-    def get_all_mh_text_signatures(self) -> list[tuple[str, list[int]]]:
-        """Return ``[(nid, minhash_array), ...]`` for all text columns."""
-        body: dict[str, Any] = {
-            "query": {"bool": {"filter": [{"term": {"dataType": "T"}}]}}
-        }
-        results: list[tuple[str, list[int]]] = []
-        res = self._client.search(
-            index="profile", body=body, scroll="5m",
-            size=500, _source=["minhash"],
-        )
-        scroll_id = res["_scroll_id"]
-        while True:
-            hits = res["hits"]["hits"]
-            if not hits:
-                break
-            for h in hits:
-                mh = h["_source"].get("minhash", [])
-                if mh:
-                    results.append((h["_id"], mh))
-            res = self._client.scroll(scroll_id=scroll_id, scroll="5m")
-            scroll_id = res["_scroll_id"]
-        self._client.clear_scroll(scroll_id=scroll_id)
-        return results
-
-    def get_all_fields_num_signatures(
-        self,
-    ) -> list[tuple[str, tuple[float, float, float, float]]]:
-        """Return ``[(nid, (median, iqr, min_val, max_val)), ...]`` for numeric cols."""
-        body: dict[str, Any] = {
-            "query": {"bool": {"filter": [{"term": {"dataType": "N"}}]}}
-        }
-        results: list[tuple[str, tuple[float, float, float, float]]] = []
-        res = self._client.search(
-            index="profile", body=body, scroll="5m",
-            size=500, _source=["median", "iqr", "minValue", "maxValue"],
-        )
-        scroll_id = res["_scroll_id"]
-        while True:
-            hits = res["hits"]["hits"]
-            if not hits:
-                break
-            for h in hits:
-                s = h["_source"]
-                results.append((
-                    h["_id"],
-                    (s["median"], s["iqr"], s["minValue"], s["maxValue"]),
-                ))
-            res = self._client.scroll(scroll_id=scroll_id, scroll="5m")
-            scroll_id = res["_scroll_id"]
-        self._client.clear_scroll(scroll_id=scroll_id)
-        return results
+            )
 
     # ==================================================================
     # Keyword search — used by Algebra / API
@@ -326,7 +288,9 @@ class ElasticStore:
         """Fuzzy keyword search on the text index."""
         body: dict[str, Any] = {
             "from": 0, "size": max_hits,
-            "query": {"match": {"text": {"query": keywords, "fuzziness": "AUTO"}}},
+            "query": {"match": {
+                "text": {"query": keywords, "fuzziness": "AUTO"},
+            }},
         }
         yield from self._run_kw_query("text", body)
 
@@ -354,7 +318,9 @@ class ElasticStore:
             "hits.hits._source.dbName", "hits.hits._source.sourceName",
             "hits.hits._source.columnName",
         ]
-        res = self._client.search(index=index, body=body, filter_path=filter_path)
+        res = self._client.search(
+            index=index, body=body, filter_path=filter_path,
+        )
         total = res.get("hits", {}).get("total", 0)
         if isinstance(total, dict):
             total = total.get("value", 0)
