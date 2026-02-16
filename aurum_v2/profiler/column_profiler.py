@@ -18,11 +18,16 @@ Elasticsearch indices created (matching legacy Java ``NativeElasticStore``):
   ``id, dbName, path, sourceName, columnName, columnNameSuggest, text[]``
 """
 
-from __future__ import annotations
 
+from __future__ import annotations
+from aurum_v2.models.hit import compute_field_id
+import re
+from datasketch import MinHash
+from aurum_v2.config import AurumConfig
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from concurrent import futures
 
 if TYPE_CHECKING:
     from elasticsearch import Elasticsearch
@@ -87,25 +92,13 @@ class ColumnProfile:
     min_value: float = 0.0
     max_value: float = 0.0
     avg_value: float = 0.0
-    median: int = 0
-    iqr: int = 0
+    median: float = 0.0
+    iqr: float = 0.0
 
     # ── Raw values (for text index) ────────────────────────────────────
     raw_values: list[str] = field(default_factory=list, repr=False)
     """Stored separately in the ES ``text`` index for keyword search."""
 
-
-# ---------------------------------------------------------------------------
-# Type detection  (replaces Java PreAnalyzer)
-# ---------------------------------------------------------------------------
-
-def detect_column_type(values: list[str]) -> str:
-    """Determine whether a column is numeric (``"N"``) or text (``"T"``).
-
-    Mirrors legacy ``PreAnalyzer.readRows()`` logic: if >50 % of non-empty
-    values parse as float, the column is numeric.
-    """
-    raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
@@ -115,12 +108,12 @@ def detect_column_type(values: list[str]) -> str:
 def compute_kmin_hash(
     values: list[str],
     k: int = _K,
-    seed: int = _PSEUDO_RANDOM_SEED,
 ) -> list[int]:
     """Compute a K-MinHash signature for a set of text values.
 
-    Algorithm (exactly matches ``KMinHash.java``):
+    USE DATASKETCH INSTEAD OF LEGACY AURUM PROFILER, 
 
+    Algorithm (exactly matches ``KMinHash.java``):
     1. Generate *k* random seed pairs ``(a, b)`` from ``Random(seed)``.
     2. Initialise ``minhash[k]`` to ``Long.MAX_VALUE``.
     3. For each value:
@@ -169,7 +162,6 @@ def compute_numeric_stats(
     Returns
     -------
     (min_value, max_value, avg_value, median, iqr)
-        ``median`` and ``iqr`` are cast to ``int`` (matching Java ``long``).
     """
     raise NotImplementedError
 
@@ -201,16 +193,15 @@ def detect_entities(
 
 def profile_column(
     db_name: str,
-    source_name: str,
+    table_name:str,
     column_name: str,
     values: list[str],
+    aurum_type: str,
     run_ner: bool = False,
 ) -> ColumnProfile:
     """Profile a single column and return a :class:`ColumnProfile`.
 
     Steps (mirrors legacy ``Worker.java`` pipeline):
-
-    1. :func:`detect_column_type` → ``"T"`` or ``"N"``.
     2. :func:`compute_cardinality` → ``unique_values``.
     3. If text:
        a. :func:`compute_kmin_hash` → ``minhash[512]``.
@@ -219,7 +210,20 @@ def profile_column(
        a. :func:`compute_numeric_stats` → min/max/avg/median/iqr.
     5. Wrap everything in a :class:`ColumnProfile`.
     """
-    raise NotImplementedError
+    unique_values = compute_cardinality(values)
+    kmin_hash = None
+    entities = None
+    numeric_stats = None
+
+    if aurum_type == "T":
+        kmin_hash = compute_kmin_hash(values=values, k=AurumConfig.minhash_num_perm)
+        entities = detect_entities(values = values, model = AurumConfig.model)
+    else:
+        numeric_stats = compute_numeric_stats(values=values)
+
+    nid = compute_field_id(db_name=db_name, source_name=table_name, field_name= column_name)
+    return ColumnProfile(nid=)
+    # raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +274,7 @@ class Profiler:
         readers: list[SourceReader],
         *,
         run_ner: bool = False,
-        max_workers: int | None = None,
+        max_workers: int = 4,
     ) -> None:
         """Profile all columns from all *readers*.
 
@@ -283,8 +287,14 @@ class Profiler:
         *max_workers* controls optional ``concurrent.futures`` parallelism
         (``None`` = sequential, matching legacy default of N=1).
         """
-        raise NotImplementedError
+        with futures.ProcessPoolExecutor(max_workers = max_workers) as executor:
+            for reader in readers:
+                for col_data in reader.read_columns():
+                    # (db_name, table_name, column_name, aurum_type, values)
+                    future = executor.submit(profile_column, col_data[0], col_data[1], col_data[2], 
+                                             col_data[3], col_data[4], run_ner)
 
+        
     # ------------------------------------------------------------------
     # Store to ES
     # ------------------------------------------------------------------

@@ -26,3 +26,5 @@ htmlcov/
 tmp/
 .lake_index/
 models/
+aurum_v2/*.json
+aurum_v2/*.jsonl

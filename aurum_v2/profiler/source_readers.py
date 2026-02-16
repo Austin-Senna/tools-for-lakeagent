@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+import duckdb
 import pandas as pd
 
 __all__ = [
@@ -67,9 +68,10 @@ class SourceConfig:
 class SourceReader(Protocol):
     """Protocol all source readers must satisfy."""
 
-    def read_columns(self) -> Iterator[tuple[str, str, str, list[str]]]:
-        """Yield ``(db_name, table_name, column_name, values)`` per column.
+    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str]]]:
+        """Yield ``(db_name, table_name, column_name, aurum_type, values)`` per column.
 
+        *aurum_type* is 'N' (Numeric) or 'T' (Text).
         *values* is a list of string-coerced cell values for that column.
         The profiler uses these to compute statistics and signatures.
         """
@@ -107,8 +109,8 @@ class CSVReader:
         self.separator = separator
         self.encoding = encoding
 
-    def read_columns(self) -> Iterator[tuple[str, str, str, list[str]]]:
-        """Yield ``(db_name, table_name, column_name, values)`` for every column
+    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str]]]:
+        """Yield ``(db_name, table_name, column_name, aurum_type, values)`` for every column
         in every CSV file under :attr:`directory`.
 
         Algorithm (mirrors legacy ``CSVSource``):
@@ -127,191 +129,23 @@ class CSVReader:
             table_name = csv_path.stem
             logger.info("Reading CSV: %s", csv_path)
             try:
-                df = pd.read_csv(
+                df_iterator = pd.read_csv(
                     csv_path,
                     sep=self.separator,
                     encoding=self.encoding,
-                    dtype=str,          # all values as strings
-                    keep_default_na=False,
                     low_memory=True,
+                    chunksize=100_000
                 )
             except Exception:
                 logger.exception("Failed to read %s", csv_path)
                 continue
 
-            for col_name in df.columns:
-                values = df[col_name].dropna().astype(str).tolist()
-                yield self.db_name, table_name, str(col_name), values
-
-
-# ---------------------------------------------------------------------------
-# S3 reader  (new — primary reader for the 9.5 TB S3 data-lake)
-# ---------------------------------------------------------------------------
-
-class S3Reader:
-    """Read CSV files from an S3 bucket and yield columns.
-
-    Uses **boto3** to list objects and **pandas** to stream-read each CSV.
-    Designed for very large data lakes:
-
-    * Supports prefix-based filtering (e.g. ``"data/census/"``).
-    * Optional row-sampling so 9.5 TB isn't fully materialized.
-    * Yields per-column data exactly like :class:`CSVReader`.
-
-    Parameters
-    ----------
-    db_name : str
-        Logical name for this S3 source (e.g. ``"va_datalake"``).
-    bucket : str
-        S3 bucket name (e.g. ``"my-datalake-bucket"``).
-    prefix : str
-        Key prefix to restrict which objects are scanned.
-    suffix : str
-        Only process objects ending with this suffix (default ``".csv"``).
-    separator : str
-        CSV delimiter.
-    encoding : str
-        File encoding.
-    sample_rows : int | None
-        If set, read only this many rows per file (random sample).
-        ``None`` means read all rows (legacy behavior).
-    aws_profile : str | None
-        Named AWS profile from ``~/.aws/credentials``.
-        If ``None``, uses the default credential chain.
-    region : str
-        AWS region (defaults to ``"us-east-1"``).
-    max_workers : int
-        Number of concurrent S3 reads (for future parallelism).
-    """
-
-    def __init__(
-        self,
-        db_name: str,
-        bucket: str,
-        prefix: str = "",
-        suffix: str = ".csv",
-        separator: str = ",",
-        encoding: str = "utf-8",
-        sample_rows: int | None = None,
-        aws_profile: str | None = None,
-        region: str = "us-east-1",
-        max_workers: int = 4,
-    ) -> None:
-        self.db_name = db_name
-        self.bucket = bucket
-        self.prefix = prefix
-        self.suffix = suffix
-        self.separator = separator
-        self.encoding = encoding
-        self.sample_rows = sample_rows
-        self.aws_profile = aws_profile
-        self.region = region
-        self.max_workers = max_workers
-
-    # ── internal: lazy boto3 client ─────────────────────────────────
-
-    def _get_s3_client(self) -> Any:
-        """Create a boto3 S3 client using the configured credentials."""
-        import boto3  # deferred import so boto3 is optional
-
-        session_kwargs: dict[str, Any] = {"region_name": self.region}
-        if self.aws_profile:
-            session_kwargs["profile_name"] = self.aws_profile
-
-        session = boto3.Session(**session_kwargs)
-        return session.client("s3")
-
-    def _list_csv_keys(self, s3_client: Any) -> list[str]:
-        """List all object keys under *prefix* that end with *suffix*."""
-        keys: list[str] = []
-        paginator = s3_client.get_paginator("list_objects_v2")
-        page_iter = paginator.paginate(Bucket=self.bucket, Prefix=self.prefix)
-
-        for page in page_iter:
-            for obj in page.get("Contents", []):
-                key: str = obj["Key"]
-                if key.endswith(self.suffix) and not key.endswith("/"):
-                    keys.append(key)
-
-        logger.info(
-            "Found %d CSV objects in s3://%s/%s",
-            len(keys),
-            self.bucket,
-            self.prefix,
-        )
-        return sorted(keys)
-
-    @staticmethod
-    def _table_name_from_key(key: str) -> str:
-        """Derive a logical table name from an S3 key.
-
-        ``"data/census/population_2020.csv"``  →  ``"population_2020"``
-        """
-        basename = key.rsplit("/", 1)[-1]          # strip directory
-        name, _ = os.path.splitext(basename)       # strip extension
-        return name
-
-    # ── public interface ────────────────────────────────────────────
-
-    def read_columns(self) -> Iterator[tuple[str, str, str, list[str]]]:
-        """Yield ``(db_name, table_name, column_name, values)`` for every
-        column in every CSV object in the configured S3 bucket/prefix.
-
-        Streaming approach:
-
-        1. ``ListObjectsV2`` with paginator to enumerate CSVs.
-        2. For each key, use ``s3_client.get_object()`` to get a streaming
-           ``Body`` and wrap it in ``pandas.read_csv``.
-        3. If ``sample_rows`` is set, read only that many rows.
-        4. For each column, coerce to strings and yield.
-
-        Large-scale notes:
-
-        * Each file is streamed — we never hold more than one CSV in memory.
-        * With ``sample_rows=1000``, profiling a 9.5 TB lake is feasible
-          in hours rather than days.
-        * For parallel reads, a future version can use
-          ``concurrent.futures.ThreadPoolExecutor`` with ``max_workers``.
-        """
-        s3_client = self._get_s3_client()
-        csv_keys = self._list_csv_keys(s3_client)
-
-        if not csv_keys:
-            logger.warning(
-                "No CSV objects found at s3://%s/%s",
-                self.bucket,
-                self.prefix,
-            )
-            return
-
-        for key in csv_keys:
-            table_name = self._table_name_from_key(key)
-            logger.info("Streaming s3://%s/%s", self.bucket, key)
-
-            try:
-                response = s3_client.get_object(Bucket=self.bucket, Key=key)
-                body = response["Body"]
-
-                # pandas can read directly from a streaming body
-                read_kwargs: dict[str, Any] = {
-                    "sep": self.separator,
-                    "encoding": self.encoding,
-                    "dtype": str,
-                    "keep_default_na": False,
-                    "low_memory": True,
-                }
-                if self.sample_rows is not None:
-                    read_kwargs["nrows"] = self.sample_rows
-
-                df = pd.read_csv(body, **read_kwargs)
-
-            except Exception:
-                logger.exception("Failed to read s3://%s/%s", self.bucket, key)
-                continue
-
-            for col_name in df.columns:
-                values = df[col_name].dropna().astype(str).tolist()
-                yield self.db_name, table_name, str(col_name), values
+            for chunk_df in df_iterator:
+                for col_name in chunk_df.columns:
+                    is_numeric = pd.api.types.is_numeric_dtype(chunk_df[col_name].dtype)
+                    aurum_type = "N" if is_numeric else "T"
+                    values = chunk_df[col_name].dropna().astype(str).tolist()
+                    yield self.db_name, table_name, str(col_name), aurum_type, values
 
 
 # ---------------------------------------------------------------------------
@@ -319,14 +153,14 @@ class S3Reader:
 # ---------------------------------------------------------------------------
 
 class DatabaseReader:
-    """Read tables from a SQL database via SQLAlchemy and yield columns.
+    """Read tables from a SQL database via DuckDB and yield columns.
 
     Parameters
     ----------
     db_name : str
         Logical database name.
     connection_string : str
-        SQLAlchemy connection string (e.g. ``"postgresql://user:pass@host/db"``).
+    db_type: str
     schema : str
         Database schema to inspect.
     """
@@ -334,25 +168,122 @@ class DatabaseReader:
     def __init__(
         self,
         db_name: str,
+        db_type: str,
         connection_string: str,
         schema: str = "public",
     ) -> None:
         self.db_name = db_name
         self.connection_string = connection_string
         self.schema = schema
+        self.db_type = db_type
 
-    def read_columns(self) -> Iterator[tuple[str, str, str, list[str]]]:
-        """Yield ``(db_name, table_name, column_name, values)`` for every column
-        in every table in the configured schema.
+    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str]]]:
+        # 1. Spin up an in-memory DuckDB instance
+        con = duckdb.connect()
 
-        Algorithm:
+        # 2. Install and load the specific extension (e.g., postgres)
+        con.execute(f"INSTALL {self.db_type};")
+        con.execute(f"LOAD {self.db_type};")
 
-        1. Connect via SQLAlchemy, inspect table names in *schema*.
-        2. For each table, ``SELECT *`` (with optional LIMIT for very large tables).
-        3. For each column, coerce values to strings and yield.
-        """
-        raise NotImplementedError
+        # 3. Attach the remote database directly into DuckDB
+        # DuckDB handles the network transfer heavily optimized
+        con.execute(f"ATTACH '{self.connection_string}' AS remote_db (TYPE {self.db_type});")
 
+        # 4. Get all table names from the attached database
+        tables_query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+        tables = [row[0] for row in con.execute(tables_query).fetchall()]
+
+        for table_name in tables:
+            # 5. Read the entire table directly into a Pandas DataFrame
+            # (Or you could chunk it using DuckDB's LIMIT/OFFSET if it's massive)
+            df = con.execute(f"SELECT * FROM remote_db.{table_name}").df()
+
+            # 6. Apply our exact same N/T logic!
+            for col_name in df.columns:
+                is_numeric = pd.api.types.is_numeric_dtype(df[col_name].dtype)
+                aurum_type = "N" if is_numeric else "T"
+                values = df[col_name].dropna().astype(str).tolist()
+                yield self.db_name, table_name, str(col_name), aurum_type, values
+
+        con.close()
+        
+
+
+# ---------------------------------------------------------------------------
+# S3 reader  (new — primary reader for the 9.5 TB S3 data-lake)
+# ---------------------------------------------------------------------------
+
+class S3Reader:
+    """
+    Simple S3 reader that processes an explicit list of S3 file paths
+    using DuckDB's native S3 + httpfs support.
+
+    Example manifest:
+        [
+            "s3://my-bucket/data/table1.csv",
+            "s3://my-bucket/data/table2.csv",
+        ]
+    """
+
+    def __init__(
+        self,
+        db_name: str,
+        s3_paths: list[str],
+        region: str = "us-east-2",
+        sample_rows: int | None = None,
+    ) -> None:
+        self.db_name = db_name
+        self.s3_paths = s3_paths
+        self.region = region
+        self.sample_rows = sample_rows
+
+    def _connect(self) -> duckdb.DuckDBPyConnection:
+        con = duckdb.connect()
+        con.execute("INSTALL httpfs;")
+        con.execute("LOAD httpfs;")
+        con.execute(f"SET s3_region='{self.region}';")
+        return con
+
+    @staticmethod
+    def _table_name_from_path(path: str) -> str:
+        return Path(path).stem
+
+    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str]]]:
+        con = self._connect()
+
+        for path in self.s3_paths:
+            table_name = self._table_name_from_path(path)
+
+            logger.info("Reading %s", path)
+
+            try:
+                df = con.execute(
+                "SELECT * FROM read_csv_auto(?)" + 
+                (" LIMIT ?" if self.sample_rows else ""),
+                [path] + ([self.sample_rows] if self.sample_rows else [])
+                ).df()
+
+            except Exception:
+                logger.exception("Failed to read %s", path)
+                continue
+
+            for col_name in df.columns:
+                series = df[col_name]
+
+                is_numeric = pd.api.types.is_numeric_dtype(series.dtype)
+                aurum_type = "N" if is_numeric else "T"
+
+                values = series.dropna().astype(str).tolist()
+
+                yield (
+                    self.db_name,
+                    table_name,
+                    str(col_name),
+                    aurum_type,
+                    values,
+                )
+
+        con.close()
 
 # ---------------------------------------------------------------------------
 # Source factory
@@ -378,21 +309,16 @@ def discover_sources(configs: list[SourceConfig]) -> list[SourceReader]:
             readers.append(
                 S3Reader(
                     db_name=cfg.name,
-                    bucket=cfg.config["bucket"],
-                    prefix=cfg.config.get("prefix", ""),
-                    suffix=cfg.config.get("suffix", ".csv"),
-                    separator=cfg.config.get("separator", ","),
-                    encoding=cfg.config.get("encoding", "utf-8"),
+                    s3_paths=cfg.config["s3_paths"],
+                    region=cfg.config.get("region", "us-east-2"),
                     sample_rows=cfg.config.get("sample_rows"),
-                    aws_profile=cfg.config.get("aws_profile"),
-                    region=cfg.config.get("region", "us-east-1"),
-                    max_workers=cfg.config.get("max_workers", 4),
-                )
-            )
+        )
+    )
         elif cfg.source_type in ("postgres", "mysql", "sqlserver", "hive"):
             readers.append(
                 DatabaseReader(
                     db_name=cfg.name,
+                    db_type= cfg.source_type,
                     connection_string=cfg.config["connection_string"],
                     schema=cfg.config.get("schema", "public"),
                 )
