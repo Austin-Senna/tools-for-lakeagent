@@ -41,6 +41,10 @@ class AurumConfig:
     memory_limit_fraction: float = 0.6   # fraction of total RAM
     join_timeout_seconds: int = 180      # 3 minutes
 
+    # --- Spacy Entity Recognition -----
+    spacy_model: str = "en_core_web_sm"
+    spacy_size: int = 1000
+    
     # ── Serialisation paths ────────────────────────────────────────────
     graph_filename: str = "graph.pickle"
     id_info_filename: str = "id_info.pickle"

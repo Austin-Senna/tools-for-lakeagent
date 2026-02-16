@@ -22,12 +22,14 @@ Elasticsearch indices created (matching legacy Java ``NativeElasticStore``):
 from __future__ import annotations
 from aurum_v2.models.hit import compute_field_id
 import re
-from datasketch import MinHash
+from datasketch import MinHash, HyperLogLog
 from aurum_v2.config import AurumConfig
+import numpy as np
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from concurrent import futures
+import random
 
 if TYPE_CHECKING:
     from elasticsearch import Elasticsearch
@@ -41,21 +43,8 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Constants (match legacy Java ddprofiler exactly)
-# ---------------------------------------------------------------------------
-
-_MERSENNE_PRIME: int = (1 << 61) - 1
-"""2^61 − 1. Used by KMinHash, matching ``KMinHash.java``."""
-
-_K: int = 512
-"""Number of MinHash permutations (legacy default)."""
-
-_PSEUDO_RANDOM_SEED: int = 1
-"""Deterministic seed for MinHash permutation generation, matching Java."""
-
-
+_SPACY_LOADED = False
+_SPACY_MODEL = None
 # ---------------------------------------------------------------------------
 # ColumnProfile — per-column statistics container
 # ---------------------------------------------------------------------------
@@ -107,11 +96,11 @@ class ColumnProfile:
 
 def compute_kmin_hash(
     values: list[str],
-    k: int = _K,
+    k: int,
 ) -> list[int]:
     """Compute a K-MinHash signature for a set of text values.
 
-    USE DATASKETCH INSTEAD OF LEGACY AURUM PROFILER, 
+    USE DATASKETCH INSTEAD OF LEGACY AURUM PROFILER.
 
     Algorithm (exactly matches ``KMinHash.java``):
     1. Generate *k* random seed pairs ``(a, b)`` from ``Random(seed)``.
@@ -125,12 +114,22 @@ def compute_kmin_hash(
             ``hash = (a[i] * raw_hash + b[i]) % MERSENNE_PRIME``
           * Update ``minhash[i] = min(minhash[i], hash)``.
     4. Return ``minhash`` as a list of *k* longs.
-
-    Note: We use Python ``int`` (arbitrary precision) to avoid overflow.
-    The result is compatible with Java's long semantics for comparison
-    purposes because all values are taken mod ``MERSENNE_PRIME``.
     """
-    raise NotImplementedError
+    m = MinHash(num_perm=k)
+
+    # split on spaces
+    tokenizer = re.compile(r'[\s_\-]+')
+    
+    # hash the values
+    for val in values:
+        # Lowercase and split into tokens
+        tokens = tokenizer.split(str(val).lower())
+        for token in tokens:
+            if token:
+                # datasketch requires bytes, so we encode the string
+                m.update(token.encode('utf8'))
+                
+    return m.hashvalues
 
 
 # ---------------------------------------------------------------------------
@@ -143,48 +142,86 @@ def compute_cardinality(values: list[str]) -> int:
     Uses a Python set for exact cardinality (adequate for most data-lake
     columns).  For very large columns, consider ``datasketch.HyperLogLog``.
     """
-    raise NotImplementedError
+    hll = HyperLogLog(p=14) 
+    
+    for val in values:
+        hll.update(val.encode('utf-8'))
+        
+    return int(hll.count())
 
 
 # ---------------------------------------------------------------------------
 # Numeric range stats  (replaces Java RangeAnalyzer)
 # ---------------------------------------------------------------------------
 
-def compute_numeric_stats(
-    values: list[str],
-) -> tuple[float, float, float, int, int]:
-    """Compute ``(min, max, avg, median, iqr)`` for a numeric column.
+def compute_numeric_stats(values: list[str]) -> tuple[float, float, float, float, float]:
+    """Compute (min, max, avg, median, iqr) safely for numeric strings."""
+    # 1. Safely convert to floats (ignoring any dirty strings that snuck in)
+    valid_floats = []
+    for v in values:
+        try:
+            valid_floats.append(float(v))
+        except ValueError:
+            pass
 
-    *values* are strings; non-parseable entries are silently skipped.
-    Uses :mod:`numpy` for statistical calculations, matching legacy Java
-    ``Range`` and ``RangeAnalyzer`` behaviour.
+    if not valid_floats:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
 
-    Returns
-    -------
-    (min_value, max_value, avg_value, median, iqr)
-    """
-    raise NotImplementedError
-
+    # 2. Let numpy handle the math instantly
+    arr = np.array(valid_floats)
+    q75, q25 = np.percentile(arr, [75, 25])
+    
+    return (
+        float(np.min(arr)),
+        float(np.max(arr)),
+        float(np.mean(arr)),
+        float(np.median(arr)),
+        float(q75 - q25) # IQR
+    )
 
 # ---------------------------------------------------------------------------
 # NER entity detection  (replaces Java EntityAnalyzer / OpenNLP)
 # ---------------------------------------------------------------------------
-
+# HINT: THEY DONT EVEN USE NER IN THE ACTUAL AURUM
 def detect_entities(
     values: list[str],
     model: str | None = None,
+    sample_size: int = 1000
 ) -> str:
-    """Run NER over sampled text values and return a comma-separated entity string.
+    """Run NER over sampled text values and return a comma-separated entity string."""
+    global _SPACY_MODEL, _SPACY_LOADED
 
-    Legacy used OpenNLP with models for: date, location, money, organization,
-    percentage, person, time.
+    # 1. Graceful Degradation: Load spacy only once, skip if missing
+    if not _SPACY_LOADED:
+        try:
+            import spacy
+            target_model = model or "en_core_web_sm"
+            
+            # Disable components we don't need for a massive speed boost
+            _SPACY_MODEL = spacy.load(
+                target_model, 
+                disable=["tagger", "parser", "attribute_ruler", "lemmatizer"]
+            )
+        except (ImportError, OSError):
+            logger.warning("spaCy or model not found. Skipping NER profiling.")
+            _SPACY_MODEL = None
+        finally:
+            _SPACY_LOADED = True
 
-    Modern replacement: ``spacy`` with an ``en_core_web_sm`` (or larger) model.
-    Returns the set of entity *labels* found (e.g. ``"PERSON,ORG,GPE"``).
+    if _SPACY_MODEL is None or not values:
+        return ""
 
-    If ``spacy`` is not installed, returns an empty string (graceful degradation).
-    """
-    raise NotImplementedError
+    # 2. Optimization: Take a random sample so we don't hang on massive columns
+    sample = random.sample(values, min(len(values), sample_size))
+    found_labels = set()
+
+    # 3. Batch processing via nlp.pipe
+    for doc in _SPACY_MODEL.pipe(sample, batch_size=256):
+        for ent in doc.ents:
+            found_labels.add(ent.label_)
+
+    # Returns something like "PERSON,ORG,DATE"
+    return ",".join(sorted(found_labels))
 
 
 # ---------------------------------------------------------------------------
@@ -211,19 +248,24 @@ def profile_column(
     5. Wrap everything in a :class:`ColumnProfile`.
     """
     unique_values = compute_cardinality(values)
-    kmin_hash = None
-    entities = None
-    numeric_stats = None
+    kmin_hash = []
+    entities = ""
+    numeric_stats = (0.0, 0.0, 0.0, 0.0, 0.0)
 
     if aurum_type == "T":
         kmin_hash = compute_kmin_hash(values=values, k=AurumConfig.minhash_num_perm)
-        entities = detect_entities(values = values, model = AurumConfig.model)
+        if run_ner:
+            entities = detect_entities(values = values, model = AurumConfig.spacy_model, sample_size=AurumConfig.spacy_size)
     else:
         numeric_stats = compute_numeric_stats(values=values)
 
     nid = compute_field_id(db_name=db_name, source_name=table_name, field_name= column_name)
-    return ColumnProfile(nid=)
-    # raise NotImplementedError
+    return ColumnProfile(nid=nid, db_name=db_name, source_name=table_name, column_name=column_name,
+                         data_type=aurum_type, total_values=len(values),
+                         unique_values=unique_values, entities=entities, minhash=kmin_hash, 
+                         min_value=numeric_stats[0], max_value=numeric_stats[1], avg_value= numeric_stats[2],
+                         median=numeric_stats[3],iqr=numeric_stats[4], raw_values=values)
+
 
 
 # ---------------------------------------------------------------------------
@@ -288,12 +330,21 @@ class Profiler:
         (``None`` = sequential, matching legacy default of N=1).
         """
         with futures.ProcessPoolExecutor(max_workers = max_workers) as executor:
+            pending_futures = []
             for reader in readers:
                 for col_data in reader.read_columns():
                     # (db_name, table_name, column_name, aurum_type, values)
-                    future = executor.submit(profile_column, col_data[0], col_data[1], col_data[2], 
-                                             col_data[3], col_data[4], run_ner)
+                    future = executor.submit(profile_column, db_name=col_data[0], table_name=col_data[1], 
+                                             column_name=col_data[2], aurum_type=col_data[3], values=col_data[4], 
+                                             run_ner=run_ner)
+                    pending_futures.append(future)
 
+            for future in futures.as_completed(pending_futures):
+                try:
+                    cprofile = future.result()
+                    self._profiles.append(cprofile)
+                except Exception as e:
+                    logger.error(f"A worker failed to profile a column: {e}")
         
     # ------------------------------------------------------------------
     # Store to ES
