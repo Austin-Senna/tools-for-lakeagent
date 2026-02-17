@@ -12,7 +12,7 @@ This is a faithful port of ``knowledgerepr/fieldnetwork.py``.
 
 from __future__ import annotations
 import pickle
-import Path
+from pathlib import Path
 from collections import defaultdict
 from collections.abc import Iterator
 
@@ -25,7 +25,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["FieldNetwork", "serialize_network", "deserialize_network"]
+__all__ = ["FieldNetwork", "serialize_network", "deserialize_network", "serialize_network_to_csv"]
 
 
 class FieldNetwork:
@@ -120,8 +120,8 @@ class FieldNetwork:
         populates ``_id_names`` and ``_source_ids``.
         """
         for (nid, db_name, sn_name, fn_name, total_values, unique_values, data_type) in fields:
-            self.__id_names[nid] = (db_name, sn_name, fn_name, data_type)
-            self.__source_ids[sn_name].append(nid)
+            self._id_names[nid] = (db_name, sn_name, fn_name, data_type)
+            self._source_ids[sn_name].append(nid)
             cardinality_ratio = float(unique_values) / float(total_values) if total_values > 0 else 0.0
             self.add_field(nid, cardinality_ratio)
         
@@ -480,3 +480,22 @@ def deserialize_network(path: str) -> FieldNetwork:
 
     # Re-instantiate the graph using the constructor we defined earlier
     return FieldNetwork(graph=graph, id_names=id_info, source_ids=table_ids)
+
+def serialize_network_to_csv(network: FieldNetwork, path: str) -> None:
+    """Export the graph as nodes and edges CSV files for visualization tools like Gephi."""
+    out_dir = Path(path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    nodes = set()
+    G = network._get_underlying_repr_graph()
+    
+    with open(out_dir / "edges.csv", "w") as f:
+        # Modern NetworkX uses .edges() instead of the deprecated .edges_iter()
+        for src, tgt in G.edges():
+            f.write(f"{src},{tgt},1\n")
+            nodes.add(src)
+            nodes.add(tgt)
+            
+    with open(out_dir / "nodes.csv", "w") as f:
+        for n in nodes:
+            f.write(f"{n},node\n")
