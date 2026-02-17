@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
+from sklearn.feature_extraction.text import TfidfVectorizer
+from typing import Iterable
 
 import numpy as np
 from datasketch import MinHashLSH, MinHash  # type: ignore[import-untyped]
@@ -62,9 +64,9 @@ class _LSHIndex:
 # ======================================================================
 # 1. Schema similarity  (TF‑IDF on column names → NearPy LSH)
 # ======================================================================
-
 def build_schema_sim_relation(
     network: FieldNetwork,
+    fields: Iterable[tuple[str, str]],  # List/Iterator of (nid, field_name)
     config: AurumConfig | None = None,
 ) -> _LSHIndex:
     """Build ``Relation.SCHEMA_SIM`` edges.
@@ -83,7 +85,43 @@ def build_schema_sim_relation(
     Returns the :class:`_LSHIndex` so it can be serialised alongside the
     network artefacts.
     """
-    raise NotImplementedError
+    
+    # 1. Safely unpack tuples to guarantee nids and docs are perfectly aligned
+    fields_list = list(fields)
+    if not fields_list:
+        return _LSHIndex(num_features=0)
+        
+    nids, docs = zip(*fields_list)
+
+    # 2. Compute TF-IDF Matrix
+    # (Replaces the legacy da.get_tfidf_docs call to keep dependencies standard)
+    vectorizer = TfidfVectorizer()
+    tfidf_matrix = vectorizer.fit_transform(docs)
+    
+    num_features = tfidf_matrix.shape[1]
+    lsh = _LSHIndex(num_features=num_features)
+
+    # 3. Index vectors into NearPy
+    # We iterate by index so we can pull the exact vector for the exact nid
+    for i, nid in enumerate(nids):
+        # Convert sparse matrix row to a dense 1D numpy array for NearPy
+        vec = tfidf_matrix[i].todense().A[0]
+        lsh.index(vec, nid)
+
+    # 4. Query and connect nodes
+    
+    for i, nid in enumerate(nids):
+        vec = tfidf_matrix[i].todense().A[0]
+        neighbors = lsh.query(vec)
+        
+        # NearPy returns a list of (data, key, distance)
+        for _, r_nid, distance in neighbors:
+            if nid != r_nid:
+                # distance is Cosine Distance. We want Similarity (1 - distance)
+                score = 1.0 - distance
+                network.add_relation(nid, r_nid, Relation.SCHEMA_SIM, score)
+
+    return lsh
 
 
 # ======================================================================
@@ -199,19 +237,18 @@ def build_content_sim_relation_num_overlap_distr(
         for cand_domain, cand_nid, cand_min, cand_left, cand_right, cand_max in entries:
             if cand_nid == ref_nid:
                 continue
+            
+            # Content Similarity Check
+            actual_overlap = compute_overlap(ref_left, ref_right, cand_left, cand_right)
+            if actual_overlap >= overlap_th:
+                network.add_relation(cand_nid, ref_nid, Relation.CONTENT_SIM, actual_overlap)
 
             # Inclusion Dependency Check
             if not (math.isinf(ref_min) or math.isinf(ref_max) or math.isinf(cand_min) or math.isinf(cand_max)):
                 if cand_min >= ref_min and cand_max <= ref_max:
                     if cand_min >= 0: # Only positive numbers as IDs
-                        actual_overlap = compute_overlap(ref_left, ref_right, cand_left, cand_right)
                         if actual_overlap >= inc_dep_th:
                             network.add_relation(cand_nid, ref_nid, Relation.INCLUSION_DEPENDENCY, 1.0)
-
-            # Content Similarity Check
-            actual_overlap = compute_overlap(ref_left, ref_right, cand_left, cand_right)
-            if actual_overlap >= overlap_th:
-                network.add_relation(cand_nid, ref_nid, Relation.CONTENT_SIM, actual_overlap)
 
     # 4. Final clustering for single points (Domain == 0)
     if not single_points:
@@ -254,4 +291,34 @@ def build_pkfk_relation(
     2. For each neighbour *ne*, add a ``PKFK`` edge scored as
        ``max(card_n, card_ne)``.
     """
-    raise NotImplementedError
+    # 1. Fetch configurations or use defaults
+    cardinality_th = config.pkfk_cardinality_th if config and hasattr(config, 'pkfk_cardinality_th') else 0.7
+
+    def get_neighborhood(nid: str):
+        """Helper to fetch candidate neighbors based on column data type."""
+        data_type = network.get_data_type_of(nid)
+        if data_type == "N":
+            return network.neighbors_id(nid, Relation.INCLUSION_DEPENDENCY)
+        elif data_type == "T":
+            return network.neighbors_id(nid, Relation.CONTENT_SIM)
+        return []
+
+    # 2. Scan the network for Primary Key candidates
+    for n in network.iterate_ids():
+        n_card = network.get_cardinality_of(n)
+        
+        # A valid PK candidate must have high uniqueness (cardinality)
+        if n_card > cardinality_th:
+            neighbors = get_neighborhood(n)
+            
+            for ne in neighbors:
+                # Safely handle the neighbor object depending on network's return type
+                ne_nid = ne.nid if hasattr(ne, 'nid') else ne
+                
+                if ne_nid != n:
+                    # Calculate the edge score based on the highest cardinality
+                    ne_card = network.get_cardinality_of(ne_nid)
+                    highest_card = max(n_card, ne_card)
+                    
+                    # Add the directional PKFK relationship
+                    network.add_relation(n, ne_nid, Relation.PKFK, highest_card)

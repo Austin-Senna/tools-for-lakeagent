@@ -68,9 +68,10 @@ def build_network(
     _timed("meta_schema", lambda: network.init_meta_schema(fields_gen))
 
     # ── Stage 3: Schema similarity (TF‑IDF → NearPy LSH) ─────────────
+    fields_name = store.get_all_fields_name()
     schema_sim_index = _timed(
         "schema_sim",
-        lambda: network_builder.build_schema_sim_relation(network, config),
+        lambda: network_builder.build_schema_sim_relation(network, fields_name, config),
     )
 
     # ── Stage 4: Content similarity — text (MinHash LSH) ──────────────

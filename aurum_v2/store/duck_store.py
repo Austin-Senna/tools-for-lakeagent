@@ -240,6 +240,16 @@ class DuckStore:
     # Retrieval — used by network-building pipeline
     # ==================================================================
 
+    def get_all_fields_name(self) -> Iterator[tuple[str, str]]:
+        """Stream ``profile`` table directly from the DuckDB cursor."""
+        cursor = self._con.execute(
+            "SELECT nid, column_name"
+            "  FROM profile"
+        )
+        # Iterate directly over the cursor! No fetchall()
+        for row in cursor:
+            yield row
+
     def get_all_fields(self) -> Iterator[tuple[str, str, str, str, int, int, str]]:
         """Stream ``profile`` table directly from the DuckDB cursor."""
         cursor = self._con.execute(
