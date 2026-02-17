@@ -241,39 +241,36 @@ class DuckStore:
     # ==================================================================
 
     def get_all_fields(self) -> Iterator[tuple[str, str, str, str, int, int, str]]:
-        """Scan ``profile`` table.
-
-        Yields ``(nid, db_name, source_name, column_name,
-        total_values, unique_values, data_type)``.
-        """
-        rows = self._con.execute(
+        """Stream ``profile`` table directly from the DuckDB cursor."""
+        cursor = self._con.execute(
             "SELECT nid, db_name, source_name, column_name,"
             "       total_values, unique_values, data_type"
             "  FROM profile"
-        ).fetchall()
-        yield from rows  # type: ignore[misc]
+        )
+        # Iterate directly over the cursor! No fetchall()
+        for row in cursor:
+            yield row
 
-    def get_all_mh_text_signatures(self) -> list[tuple[str, list[int]]]:
-        """Return ``[(nid, minhash_array), ...]`` for all text columns."""
-        rows = self._con.execute(
+    def get_all_mh_text_signatures(self) -> Iterator[tuple[str, list[int]]]:
+        """Yield ``(nid, minhash_array)`` for all text columns."""
+        cursor = self._con.execute(
             "SELECT nid, minhash FROM profile"
             " WHERE data_type = 'T' AND minhash IS NOT NULL"
-        ).fetchall()
-        results: list[tuple[str, list[int]]] = []
-        for nid, mh in rows:
+        )
+        for nid, mh in cursor:
             if mh:
-                results.append((nid, list(mh)))
-        return results
+                yield (nid, list(mh))
 
     def get_all_fields_num_signatures(
         self,
-    ) -> list[tuple[str, tuple[float, float, float, float]]]:
-        """Return ``[(nid, (median, iqr, min_val, max_val)), ...]`` for numeric cols."""
-        rows = self._con.execute(
+    ) -> Iterator[tuple[str, tuple[float, float, float, float]]]:
+        """Yield ``(nid, (median, iqr, min_val, max_val))`` for numeric cols."""
+        cursor = self._con.execute(
             "SELECT nid, median, iqr, min_value, max_value"
             "  FROM profile WHERE data_type = 'N'"
-        ).fetchall()
-        return [(nid, (med, iq, mn, mx)) for nid, med, iq, mn, mx in rows]
+        )
+        for nid, med, iq, mn, mx in cursor:
+            yield (nid, (med, iq, mn, mx))
 
     # ==================================================================
     # Keyword search — DuckDB FTS (used by Algebra / API)
@@ -301,9 +298,9 @@ class DuckStore:
                 "SELECT t.nid, p.db_name, p.source_name, p.column_name"
                 "  FROM text_index t"
                 "  JOIN profile p ON t.nid = p.nid"
-                " WHERE t.text LIKE ?"
+                " WHERE regexp_matches(t.text, ?)"
                 " LIMIT ?",
-                [f"% {keywords} %", max_hits],
+                [rf"\b{keywords}\b", max_hits],
             ).fetchall()
         elif kw_type == KWType.KW_SCHEMA:
             rows = self._con.execute(

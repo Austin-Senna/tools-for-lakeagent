@@ -11,7 +11,8 @@ This is a faithful port of ``knowledgerepr/fieldnetwork.py``.
 """
 
 from __future__ import annotations
-
+import pickle
+import Path
 from collections import defaultdict
 from collections.abc import Iterator
 
@@ -19,7 +20,10 @@ import networkx as nx
 
 from aurum_v2.models.drs import DRS
 from aurum_v2.models.hit import Hit
-from aurum_v2.models.relation import OP, Relation
+from aurum_v2.models.relation import OP, Relation, Operation
+import logging 
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["FieldNetwork", "serialize_network", "deserialize_network"]
 
@@ -115,11 +119,21 @@ class FieldNetwork:
         Creates one node per column with a ``cardinality`` attribute and
         populates ``_id_names`` and ``_source_ids``.
         """
-        raise NotImplementedError
+        for (nid, db_name, sn_name, fn_name, total_values, unique_values, data_type) in fields:
+            self.__id_names[nid] = (db_name, sn_name, fn_name, data_type)
+            self.__source_ids[sn_name].append(nid)
+            cardinality_ratio = float(unique_values) / float(total_values) if total_values > 0 else 0.0
+            self.add_field(nid, cardinality_ratio)
+        
+        logger.info(
+            "Graph initialized with %d nodes across %d tables.", 
+            self.graph_order(), self.get_number_tables()
+        )
 
     def add_field(self, nid: str, cardinality: float | None = None) -> str:
         """Add a single graph node for column *nid* with optional cardinality."""
-        raise NotImplementedError
+        self._graph.add_node(nid, cardinality = cardinality)
+        return nid
 
     def add_relation(
         self,
@@ -133,7 +147,7 @@ class FieldNetwork:
         The ``relation`` serves as the MultiGraph *key*, and ``score`` is
         stored in the edge‑data dict.
         """
-        raise NotImplementedError
+        self._graph.add_edge(node_src, node_target, key=relation, score=score)
 
     # ------------------------------------------------------------------
     # Relation → OP mapping
@@ -146,6 +160,7 @@ class FieldNetwork:
             Relation.CONTENT_SIM: OP.CONTENT_SIM,
             Relation.ENTITY_SIM: OP.ENTITY_SIM,
             Relation.PKFK: OP.PKFK,
+            Relation.INCLUSION_DEPENDENCY: OP.CONTENT_SIM,
             Relation.SCHEMA: OP.TABLE,
             Relation.SCHEMA_SIM: OP.SCHEMA_SIM,
             Relation.MEANS_SAME: OP.MEANS_SAME,
@@ -168,7 +183,17 @@ class FieldNetwork:
         The returned DRS carries provenance wired as
         ``Operation(op_from_relation, params=[hit])``.
         """
-        raise NotImplementedError
+        nid = str(hit.nid) if isinstance(hit, Hit) else str(hit)
+        data = []
+        neighbors = self._graph[nid]
+
+        for k,v in neighbors.items():
+            if relation in v:
+                score = v[relation]['score']
+                (db_name, source_name, field_name, data_type) = self._id_names[k]
+                data.append(Hit(k, db_name, source_name, field_name, score))
+        op = self.get_op_from_relation(relation)
+        return DRS(data, Operation(op, params=[hit]))
 
     # ------------------------------------------------------------------
     # Path finding — field level
@@ -181,19 +206,69 @@ class FieldNetwork:
         relation: Relation,
         max_hops: int = 5,
     ) -> DRS:
-        """DFS path search between two *columns* via *relation*.
+        """BFS path search between two *columns* via *relation*.
+        Much better than original DFS search in Aurum Paper"""
+        
+        # 1. Edge case: The source IS the target
+        if source.nid == target.nid:
+            return DRS([target], Operation(OP.ORIGIN, params=[source]))
 
-        On success, returns a DRS whose provenance DAG contains the hop‑by‑hop
-        chain::
+        # 2. Iterative BFS to find the shortest path matching the relation
+        # Queue stores: (current_node_id, path_of_hits_so_far)
+        queue = [(str(source.nid), [source])]
+        visited = {str(source.nid)}
+        found_path = None
 
-            ORIGIN(source) → PKFK → intermediate₁ → PKFK → … → target
+        while queue:
+            current_nid, path = queue.pop(0)
 
-        On failure returns an empty carrier DRS.
+            # Stop exploring this branch if we hit the user's hop limit
+            if len(path) - 1 >= max_hops:
+                continue
 
-        .. note:: ``max_hops`` is hard‑coded to 5 in the legacy code regardless
-           of the parameter value passed in.
-        """
-        raise NotImplementedError
+            # Fast NetworkX adjacency lookup: self._graph[nid] returns neighbors & edges
+            for neighbor_nid, edges in self._graph[current_nid].items():
+                if relation in edges:
+                    if neighbor_nid not in visited:
+                        # Reconstruct the Hit object for the neighbor
+                        db, src, field, dtype = self._id_names[neighbor_nid]
+                        neighbor_hit = Hit(
+                            nid=neighbor_nid, 
+                            db_name=db, 
+                            source_name=src, 
+                            field_name=field, 
+                            score=edges[relation]['score']
+                        )
+                        
+                        new_path = path + [neighbor_hit]
+                        if neighbor_nid == str(target.nid):
+                            found_path = new_path
+                            break
+                        
+                        visited.add(neighbor_nid)
+                        queue.append((neighbor_nid, new_path))
+            
+            if found_path:
+                break
+        
+        # If we exhausted the queue and found nothing
+        if not found_path:
+            return DRS([], Operation(OP.NONE))
+
+        # 3. Assemble the Provenance Chain cleanly (No more hardcoded PKFK!)
+        op_type = self.get_op_from_relation(relation)
+        
+        # Start the chain with the ORIGIN operation
+        o_drs = DRS([found_path[0]], Operation(OP.ORIGIN))
+        
+        # Chain the rest of the hops together dynamically
+        prev_hit = found_path[0]
+        for current_hit in found_path[1:]:
+            step_drs = DRS([current_hit], Operation(op_type, params=[prev_hit]))
+            o_drs = o_drs.absorb_provenance(step_drs) 
+            prev_hit = current_hit
+            
+        return o_drs
 
     # ------------------------------------------------------------------
     # Path finding — table level
@@ -208,23 +283,92 @@ class FieldNetwork:
         max_hops: int = 3,
         lean_search: bool = False,
     ) -> DRS:
-        """DFS path search between two *tables* via *relation*.
+        """BFS path search between two *tables* via *relation*."""
+        
+        # 1. Edge Case: Already in the same table
+        if source.source_name == target.source_name:
+            return DRS([target], Operation(OP.ORIGIN, params=[source]))
 
-        Unlike :meth:`find_path_hit`, this performs a **table‑level** DFS:
-        for each neighbour column, all sibling columns in the same table are
-        expanded (via ``api.drs_from_table_hit``), and the provenance chain
-        records both the cross‑table PKFK hop *and* the same‑table OP.TABLE
-        link.
+        # 2. Initialize Queue
+        # Queue stores: (current_outbound_hit, path_of_tuples)
+        # Path Tuple: (outbound_hit, inbound_hit_that_brought_us_to_this_table)
+        queue = [(source, [(source, None)])]
+        
+        # Track visited TABLES (not columns) to prevent infinite loops
+        visited_tables = {source.source_name}
+        found_path = None
 
-        Parameters
-        ----------
-        api : Algebra | API
-            Required to expand table neighbours via ``drs_from_table_hit``.
-        lean_search : bool
-            If ``True``, use ``_drs_from_table_hit_lean_no_provenance`` to
-            skip provenance construction in table expansion (faster).
-        """
-        raise NotImplementedError
+        while queue:
+            current_hit, path = queue.pop(0)
+
+            if len(path) - 1 >= max_hops:
+                continue
+
+            # Find cross-table neighbors directly from NetworkX
+            neighbor_nids = []
+            for n_nid, edges in self._graph[str(current_hit.nid)].items():
+                if relation in edges:
+                    neighbor_nids.append((n_nid, edges[relation]['score']))
+
+            for n_nid, score in neighbor_nids:
+                db, src, field, dtype = self._id_names[n_nid]
+
+                # Skip edges that point back to our own table
+                if src == current_hit.source_name:
+                    continue
+
+                neighbor_hit = Hit(n_nid, db, src, field, score)
+
+                # Did we reach the target's table?
+                if src == target.source_name:
+                    found_path = path + [(target, neighbor_hit)]
+                    break
+
+                # If it's a completely new table, expand it
+                if src not in visited_tables:
+                    visited_tables.add(src)
+
+                    # Get all sibling columns in this new table via the API
+                    if lean_search and hasattr(api, "_drs_from_table_hit_lean_no_provenance"):
+                        siblings = api._drs_from_table_hit_lean_no_provenance(neighbor_hit)
+                    else:
+                        siblings = api.drs_from_table_hit(neighbor_hit)
+
+                    # Queue every sibling as a potential outbound jump for the next hop
+                    for sibling in siblings:
+                        queue.append((sibling, path + [(sibling, neighbor_hit)]))
+
+            if found_path:
+                break
+
+        # 3. Handle Failure
+        if not found_path:
+            return DRS([], Operation(OP.NONE))
+
+        # 4. Assemble the Provenance Chain cleanly
+        op_type = self.get_op_from_relation(relation)
+        
+        # Start with the origin
+        src_outbound, _ = found_path[0]
+        o_drs = DRS([src_outbound], Operation(OP.ORIGIN))
+        
+        prev_outbound = src_outbound
+
+        # Stitch the hops together
+        for current_outbound, current_inbound in found_path[1:]:
+            
+            # Step A: The cross-table jump (e.g., PKFK)
+            jump_drs = DRS([current_inbound], Operation(op_type, params=[prev_outbound]))
+            o_drs = o_drs.absorb_provenance(jump_drs)
+            
+            # Step B: The intra-table jump (e.g., TABLE linking column A to column B)
+            if current_inbound.nid != current_outbound.nid:
+                table_drs = DRS([current_outbound], Operation(OP.TABLE, params=[current_inbound]))
+                o_drs = o_drs.absorb_provenance(table_drs)
+                
+            prev_outbound = current_outbound
+            
+        return o_drs
 
     # ------------------------------------------------------------------
     # Degree / diagnostics
@@ -255,7 +399,14 @@ class FieldNetwork:
         list[tuple[str, int]]
             ``[(nid, degree), ...]`` sorted descending by degree.
         """
-        raise NotImplementedError
+        # 1. NetworkX's .degree() returns a DegreeView (an iterator of (node, degree) tuples)
+        degree_list = list(self._graph.degree())
+        
+        # 2. Sort descending based on the degree (which is the second item in the tuple: x[1])
+        degree_list.sort(key=lambda x: x[1], reverse=True)
+        
+        # 3. Return the top K slice
+        return degree_list[:topk]
 
     # ------------------------------------------------------------------
     # Enumeration / debug helpers
@@ -265,8 +416,18 @@ class FieldNetwork:
         self, relation: Relation, as_str: bool = True
     ) -> Iterator:
         """Iterate over all distinct edge pairs for *relation*."""
-        raise NotImplementedError
-
+        # By passing keys=True, NetworkX yields (node_src, node_target, edge_key)
+        # Because the graph is undirected, NetworkX guarantees it only yields each pair once.
+        for u, v, key in self._graph.edges(keys=True):
+            if key == relation:
+                if as_str:
+                    # Translate the raw nids into human-readable "table.column" strings
+                    _, src_u, col_u, _ = self._id_names[u]
+                    _, src_v, col_v, _ = self._id_names[v]
+                    yield (f"{src_u}.{col_u}", f"{src_v}.{col_v}")
+                else:
+                    # Just yield the raw nids
+                    yield (u, v)
     # ------------------------------------------------------------------
     # Internal graph access (used by serialisation & CSV export)
     # ------------------------------------------------------------------
@@ -290,9 +451,32 @@ def serialize_network(network: FieldNetwork, path: str) -> None:
 
     Creates ``graph.pickle``, ``id_info.pickle``, ``table_ids.pickle``.
     """
-    raise NotImplementedError
+    out_dir = Path(path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use HIGHEST_PROTOCOL for massive speed and compression benefits
+    with open(out_dir / "graph.pickle", "wb") as f:
+        pickle.dump(network._get_underlying_repr_graph(), f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with open(out_dir / "id_info.pickle", "wb") as f:
+        pickle.dump(network._get_underlying_repr_id_to_field_info(), f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with open(out_dir / "table_ids.pickle", "wb") as f:
+        pickle.dump(network._get_underlying_repr_table_to_ids(), f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def deserialize_network(path: str) -> FieldNetwork:
     """Reconstruct a :class:`FieldNetwork` from pickled artefacts at *path*."""
-    raise NotImplementedError
+    in_dir = Path(path)
+
+    with open(in_dir / "graph.pickle", "rb") as f:
+        graph = pickle.load(f)
+
+    with open(in_dir / "id_info.pickle", "rb") as f:
+        id_info = pickle.load(f)
+
+    with open(in_dir / "table_ids.pickle", "rb") as f:
+        table_ids = pickle.load(f)
+
+    # Re-instantiate the graph using the constructor we defined earlier
+    return FieldNetwork(graph=graph, id_names=id_info, source_ids=table_ids)
