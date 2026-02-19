@@ -82,9 +82,8 @@ class SourceReader(Protocol):
 # ---------------------------------------------------------------------------
 # CSV reader  (replaces legacy Java CSVSource)
 # ---------------------------------------------------------------------------
-
 class CSVReader:
-    """Read all CSV files from a directory and yield columns.
+    """Read all CSV files from a directory and yield columns using DuckDB.
 
     Parameters
     ----------
@@ -94,10 +93,10 @@ class CSVReader:
         Path to a directory containing ``.csv`` files.
     separator : str
         CSV delimiter.
-    encoding : str
-        File encoding.
-    max_text_values : int
-        Max unique text values retained per column (caps memory at reader level).
+    limit_values : bool
+        If True, applies reservoir sampling to limit the number of rows read.
+    max_values : int
+        The maximum number of rows to sample per file if limit_values is True (default 10_000).
     """
 
     def __init__(
@@ -105,16 +104,14 @@ class CSVReader:
         db_name: str,
         directory: str | Path,
         separator: str = ",",
-        encoding: str = "utf-8",
-        limit_text_values: bool = False,
-        max_text_values: int = 1_000,
+        limit_values: bool = False,
+        max_values: int = 10_000,
     ) -> None:
         self.db_name = db_name
         self.directory = Path(directory)
         self.separator = separator
-        self.encoding = encoding
-        self.limit_text_values = limit_text_values
-        self.max_text_values = max_text_values
+        self.limit_values = limit_values
+        self.max_values = max_values
 
     def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str], str]]:
         """Yield ``(db_name, table_name, column_name, aurum_type, values, path)`` for every column
@@ -125,30 +122,44 @@ class CSVReader:
             logger.warning("No CSV files found in %s", self.directory)
             return
 
+        con = duckdb.connect()
+
         for csv_path in csv_files:
             table_name = csv_path.stem
             logger.info("Reading CSV: %s", csv_path)
+            
             try:
-                df_iterator = pd.read_csv(
-                    csv_path,
-                    sep=self.separator,
-                    encoding=self.encoding,
-                    low_memory=True,
-                    chunksize=100_000,
-                )
+                if self.limit_values:
+                    query = (
+                        f"SELECT * FROM read_csv_auto(?, delim=?)"
+                        f" USING SAMPLE {self.max_values} ROWS (reservoir)"
+                    )
+                    df = con.execute(query, [str(csv_path), self.separator]).df()
+                else:
+                    query = (
+                        f"SELECT * FROM read_csv_auto(?, delim=?)"
+                    )
+                    df = con.execute(query, [str(csv_path), self.separator]).df()
             except Exception:
                 logger.exception("Failed to read %s", csv_path)
                 continue
 
-            for chunk_df in df_iterator:
-                for col_name in chunk_df.columns:
-                    is_numeric = pd.api.types.is_numeric_dtype(chunk_df[col_name].dtype)
-                    aurum_type = "N" if is_numeric else "T"
-                    values = chunk_df[col_name].dropna().astype(str).tolist()
-                    if self.limit_text_values and aurum_type == "T":
-                        values = values[:self.max_text_values]
-                    yield self.db_name, table_name, str(col_name), aurum_type, values, str(csv_path)
+            for col_name in df.columns:
+                series = df[col_name]
+                is_numeric = pd.api.types.is_numeric_dtype(series.dtype)
+                aurum_type = "N" if is_numeric else "T"
+                values = series.dropna().astype(str).tolist()
 
+                yield (
+                    self.db_name,
+                    table_name,
+                    str(col_name),
+                    aurum_type,
+                    values,
+                    str(csv_path),
+                )
+                
+        con.close()
 
 # ---------------------------------------------------------------------------
 # Database reader  (replaces legacy PostgresSource, SQLServerSource, etc.)
@@ -221,7 +232,7 @@ class DatabaseReader:
 # ---------------------------------------------------------------------------
 
 class S3Reader:
-    """S3 reader using DuckDB's native httpfs + Bernoulli sampling.
+    """S3 reader using DuckDB's native httpfs + reservoir sampling.
 
     Parameters
     ----------
@@ -231,10 +242,10 @@ class S3Reader:
         Explicit list of ``s3://`` URIs to profile.
     region : str
         AWS region.
-    sample_rows : int
-        Number of rows to Bernoulli-sample per file (default 10_000).
-    max_text_values : int
-        Max unique text values retained per column.
+    limit_values : bool
+        If True, applies reservoir sampling to limit the number of rows downloaded.
+    max_values : int
+        The maximum number of rows to sample per file if limit_values is True (default 10_000).
     """
 
     def __init__(
@@ -242,16 +253,14 @@ class S3Reader:
         db_name: str,
         s3_paths: list[str],
         region: str = "us-east-2",
-        sample_rows: int = 10_000,
-        limit_text_values: bool = False,
-        max_text_values: int = 1_000,
+        limit_values: bool = False,
+        max_values: int = 10_000,
     ) -> None:
         self.db_name = db_name
         self.s3_paths = s3_paths
         self.region = region
-        self.sample_rows = sample_rows
-        self.limit_text_values = limit_text_values
-        self.max_text_values = max_text_values
+        self.limit_values = limit_values
+        self.max_values = max_values
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
         con = duckdb.connect()
@@ -296,11 +305,17 @@ class S3Reader:
             logger.info("Reading %s", path)
 
             try:
-                query = (
-                    f"SELECT * FROM read_csv_auto(?)"
-                    f" USING SAMPLE {self.sample_rows} ROWS (reservoir)"
-                )
-                df = con.execute(query, [path]).df()
+                if self.limit_values:
+                    query = (
+                        f"SELECT * FROM read_csv_auto(?)"
+                        f" USING SAMPLE {self.max_values} ROWS (reservoir)"
+                    )
+                    df = con.execute(query, [path]).df()
+                else:
+                    query = (
+                        "SELECT * FROM read_csv_auto(?)"
+                    )
+                    df = con.execute(query, [path]).df()
             except Exception:
                 logger.exception("Failed to read %s", path)
                 continue
@@ -310,8 +325,7 @@ class S3Reader:
                 is_numeric = pd.api.types.is_numeric_dtype(series.dtype)
                 aurum_type = "N" if is_numeric else "T"
                 values = series.dropna().astype(str).tolist()
-                if self.limit_text_values and aurum_type == "T":
-                    values = values[:self.max_text_values]
+                
 
                 yield (
                     self.db_name,
@@ -327,7 +341,6 @@ class S3Reader:
 # ---------------------------------------------------------------------------
 # Source factory
 # ---------------------------------------------------------------------------
-
 def discover_sources(configs: list[SourceConfig]) -> list[SourceReader]:
     """Instantiate the appropriate :class:`SourceReader` for each config entry.
 
@@ -341,9 +354,8 @@ def discover_sources(configs: list[SourceConfig]) -> list[SourceReader]:
                     db_name=cfg.name,
                     directory=cfg.config.get("path", "."),
                     separator=cfg.config.get("separator", ","),
-                    encoding=cfg.config.get("encoding", "utf-8"),
-                    limit_text_values=cfg.config.get("limit_text_values", False),
-                    max_text_values=cfg.config.get("max_text_values", 1_000),
+                    limit_values=cfg.config.get("limit_values", False),
+                    max_values=cfg.config.get("max_values", 10_000),
                 )
             )
         elif cfg.source_type == "s3":
@@ -352,16 +364,15 @@ def discover_sources(configs: list[SourceConfig]) -> list[SourceReader]:
                     db_name=cfg.name,
                     s3_paths=cfg.config["s3_paths"],
                     region=cfg.config.get("region", "us-east-2"),
-                    sample_rows=cfg.config.get("sample_rows", 10_000),
-                    limit_text_values=cfg.config.get("limit_text_values", False),
-                    max_text_values=cfg.config.get("max_text_values", 1_000),
+                    limit_values=cfg.config.get("limit_values", False),
+                    max_values=cfg.config.get("max_values", 10_000),
                 )
             )
         elif cfg.source_type in ("postgres", "mysql", "sqlserver", "hive"):
             readers.append(
                 DatabaseReader(
                     db_name=cfg.name,
-                    db_type= cfg.source_type,
+                    db_type=cfg.source_type,
                     connection_string=cfg.config["connection_string"],
                     schema=cfg.config.get("schema", "public"),
                 )
