@@ -1,6 +1,5 @@
 import os
 import sys
-import re
 import boto3
 import concurrent.futures
 from botocore.config import Config
@@ -10,10 +9,9 @@ from dotenv import load_dotenv
 
 BUCKET = "lakeqa-yc4103-datalake"
 REGION = "us-east-1"
-MAX_THREADS = 50  # Process 50 datasets at the exact same time
+MAX_THREADS = 50 
 
 def _get_s3_client():
-    # ✨ CRITICAL: Increase the connection pool size so threads don't bottleneck
     boto_config = Config(max_pool_connections=MAX_THREADS)
     return boto3.client(
         's3',
@@ -41,40 +39,37 @@ def list_files(s3, dataset_id: str, limit: int = 100) -> List[Dict[str, Any]]:
                 })
     return all_files
 
-def _is_table_by_peeking(s3, file_path: str) -> bool:
-    """Downloads the first 2KB of a file from S3 to verify structural integrity."""
+def _is_valid_json_table(s3, file_path: str) -> bool:
+    """
+    Downloads the first 50KB of a JSON file.
+    Uses structural fingerprints to identify plain arrays, GeoJSON, and Socrata JSON.
+    """
     lower_path = file_path.lower()
-    ignore_list = ['metadata.json', 'signed-metadata', 'catalog.', 'cc-by', 'iso.xml', 'iso.txt', 'readme']
+    ignore_list = ['metadata.json', 'signed-metadata']
     if any(skip in lower_path for skip in ignore_list):
         return False
     
     try:
-        response = s3.get_object(Bucket=BUCKET, Key=file_path, Range='bytes=0-2048')
-        content = response['Body'].read().decode('utf-8', errors='ignore')
+        # 50KB is large enough to catch Socrata metadata and GeoJSON headers, 
+        # but small enough to remain incredibly cheap/fast.
+        response = s3.get_object(Bucket=BUCKET, Key=file_path, Range='bytes=0-51200')
+        content = response['Body'].read().decode('utf-8', errors='ignore').strip()
         
-        lines = [line.strip() for line in content.split('\n') if line.strip()]
-        if len(lines) < 3:
+        if not content:
             return False
 
-        json_lines = sum(1 for line in lines[:5] if line.startswith('{') and line.endswith('}'))
-        if json_lines >= 3:
+        # RULE 1: Plain JSON array
+        if content.startswith('['):
             return True
-            
-        first_char = content.strip()[0]
-        if first_char in ['{', '[']:
-            return False
 
-        delimiters = [',', '\t', '|', ';']
-        for delim in delimiters:
-            counts = []
-            for line in lines[:5]:
-                clean_line = re.sub(r'"[^"]*"', '', line)
-                counts.append(clean_line.count(delim))
+        if content.startswith('{'):
+            # RULE 2: Socrata JSON format (checks for meta.view.columns)
+            if '"meta"' in content and '"view"' in content and '"columns"' in content:
+                return True
             
-            valid_counts = [c for c in counts if c > 0]
-            if len(valid_counts) >= 3 and len(set(valid_counts[:3])) == 1:
-                if valid_counts[0] >= 1:
-                    return True
+            # RULE 3: GeoJSON FeatureCollection
+            if '"FeatureCollection"' in content and '"features"' in content:
+                return True
                 
         return False
         
@@ -82,38 +77,33 @@ def _is_table_by_peeking(s3, file_path: str) -> bool:
         return False
 
 def process_single_dataset(s3, dataset_id: str) -> tuple:
-    """Worker function for a single thread. Returns (dataset_id, list_of_uris)."""
     files_data = list_files(s3, dataset_id)
     s3_uris = []
     
     for f in files_data:
         lower_path = f['path'].lower()
-        if lower_path.endswith(('.jpg', '.png', '.pdf')):
+        
+        # We only care about .json files for this specific script
+        if not lower_path.endswith('.json'):
             continue
             
         uri = f"s3://{BUCKET}/{f['full_key']}"
             
-        if lower_path.endswith('.zip'):
-            s3_uris.append(uri)
-            continue
-            
-        if _is_table_by_peeking(s3, f['full_key']):
+        if _is_valid_json_table(s3, f['full_key']):
             s3_uris.append(uri)
             
     return dataset_id, s3_uris
 
-def extract_and_verify_tables(input_txt, output_txt, log_txt="processed_datasets.log"):
+def extract_and_verify_json(input_txt, output_txt, log_txt="processed_datasets_json.log"):
     if not Path(input_txt).exists():
         print(f"Error: Could not find {input_txt}")
         return
 
-    # 1. Load the state (Checkpointing)
     processed_datasets = set()
     if Path(log_txt).exists():
         with open(log_txt, 'r') as log:
             processed_datasets = set(line.strip() for line in log if line.strip())
             
-    # 2. Figure out what is left to do
     with open(input_txt, "r") as f:
         all_datasets = [line.strip() for line in f if line.strip()]
         
@@ -129,22 +119,18 @@ def extract_and_verify_tables(input_txt, output_txt, log_txt="processed_datasets
 
     s3_client = _get_s3_client()
     
-    # 3. Stream writing: Open files in Append mode
     with open(output_txt, 'a', encoding='utf-8') as out_file, \
          open(log_txt, 'a', encoding='utf-8') as log_file:
              
-        # 4. Multithreading execution
-        print(f"\nSpinning up {MAX_THREADS} threads... Hold onto your terminal.")
+        print(f"\nSpinning up {MAX_THREADS} threads to hunt for JSON tables...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
             
-            # Submit all tasks to the queue
             future_to_dataset = {
                 executor.submit(process_single_dataset, s3_client, ds): ds 
                 for ds in pending_datasets
             }
             
             completed_count = 0
-            # As threads finish (in whatever order), catch their results instantly
             for future in concurrent.futures.as_completed(future_to_dataset):
                 dataset_id = future_to_dataset[future]
                 completed_count += 1
@@ -152,15 +138,12 @@ def extract_and_verify_tables(input_txt, output_txt, log_txt="processed_datasets
                 try:
                     _, verified_uris = future.result()
                     
-                    # Stream writes to disk instantly
                     for uri in verified_uris:
                         out_file.write(f"{uri}\n")
-                        print(f"  ✅ VERIFIED: {uri}")
+                        print(f"  ✅ VERIFIED JSON: {uri}")
                     
-                    # Mark dataset as done so we don't repeat it on crash
                     log_file.write(f"{dataset_id}\n")
                     
-                    # Force Python to actually write the buffer to the OS right now
                     out_file.flush()
                     log_file.flush()
                     
@@ -174,7 +157,9 @@ def extract_and_verify_tables(input_txt, output_txt, log_txt="processed_datasets
 
 if __name__ == "__main__":
     load_dotenv()
-    input_txt = sys.argv[1] if len(sys.argv) > 1 else "all_datasets_complete.txt"
-    output_txt = sys.argv[2] if len(sys.argv) > 2 else "verified_s3_tables.txt"
     
-    extract_and_verify_tables(input_txt, output_txt)
+    input_txt = sys.argv[1] if len(sys.argv) > 1 else "all_datasets_complete.txt"
+    # Outputting to a dedicated JSON file so your CSV list stays safe
+    output_txt = sys.argv[2] if len(sys.argv) > 2 else "verified_s3_json_tables.txt"
+    
+    extract_and_verify_json(input_txt, output_txt)

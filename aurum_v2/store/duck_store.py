@@ -148,8 +148,6 @@ class DuckStore:
     def bulk_insert_profiles(
         self,
         profiles: list[ColumnProfile],
-        *,
-        max_text_values: int = 1_000,
     ) -> int:
         """Insert profiles into ``profile`` and ``text_index`` tables.
 
@@ -197,7 +195,7 @@ class DuckStore:
             ))
 
             if p.data_type == "T" and p.raw_values:
-                unique_vals = list(dict.fromkeys(p.raw_values))[:max_text_values]
+                unique_vals = list(dict.fromkeys(p.raw_values))
                 text_rows.append((
                     p.nid,
                     p.db_name,

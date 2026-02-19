@@ -324,18 +324,17 @@ class Profiler:
             ``{"duckdb": n, "elasticsearch": m}`` counts per backend.
         """
         result: dict[str, int] = {}
-        max_tv = self._config.max_text_values
 
         if duck is not None:
             n = duck.bulk_insert_profiles(
-                self._profiles, max_text_values=max_tv,
+                self._profiles
             )
             result["duckdb"] = n
             logger.info("Stored %d profiles to DuckDB", n)
 
         if es is not None:
             n = es.bulk_insert_profiles(
-                self._profiles, max_text_values=max_tv,
+                self._profiles
             )
             result["elasticsearch"] = n
             logger.info("Stored %d actions to Elasticsearch", n)

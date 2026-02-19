@@ -1,0 +1,196 @@
+<html>
+    <head>
+        <meta charset="utf-8">
+        
+            <script src="lib/bindings/utils.js"></script>
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" integrity="sha512-WgxfT5LWjfszlPHXRmBWHkV2eceiWTOBvrKCNbdgDYTHrT2AeLCGbF4sZlZw3UMN3WtL0tGUoIAKsu8mllg/XA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js" integrity="sha512-LnvoEWDFrqGHlHmDD2101OrLcbsfkrzoSpvtSQtxK3RMnRV0eOkhhBN2dXHKRrUU8p2DGRTk35n4O8nWSVe1mQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+            
+        
+<center>
+<h1><h3>Aurum v2 — Relationship Graph</h3><p>20 tables, 142 cross-table edges</p><ul><li style="color:#3498db">■ SCHEMA_SIM</li><li style="color:#2ecc71">■ CONTENT_SIM</li><li style="color:#e74c3c">■ PKFK</li><li style="color:#f39c12">■ INCLUSION_DEPENDENCY</li><li style="color:#9b59b6">■ ENTITY_SIM</li></ul></h1>
+</center>
+
+<!-- <link rel="stylesheet" href="../node_modules/vis/dist/vis.min.css" type="text/css" />
+<script type="text/javascript" src="../node_modules/vis/dist/vis.js"> </script>-->
+        <link
+          href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/css/bootstrap.min.css"
+          rel="stylesheet"
+          integrity="sha384-eOJMYsd53ii+scO/bJGFsiCZc+5NDVN2yr8+0RDqr0Ql0h+rP48ckxlpbzKgwra6"
+          crossorigin="anonymous"
+        />
+        <script
+          src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/js/bootstrap.bundle.min.js"
+          integrity="sha384-JEW9xMcG8R+pH31jmWH6WWP0WintQrMb4s7ZOdauHnUtxwoG2vI5DkLtS3qm9Ekf"
+          crossorigin="anonymous"
+        ></script>
+
+
+        <center>
+          <h1><h3>Aurum v2 — Relationship Graph</h3><p>20 tables, 142 cross-table edges</p><ul><li style="color:#3498db">■ SCHEMA_SIM</li><li style="color:#2ecc71">■ CONTENT_SIM</li><li style="color:#e74c3c">■ PKFK</li><li style="color:#f39c12">■ INCLUSION_DEPENDENCY</li><li style="color:#9b59b6">■ ENTITY_SIM</li></ul></h1>
+        </center>
+        <style type="text/css">
+
+             #mynetwork {
+                 width: 100%;
+                 height: 900px;
+                 background-color: #1a1a2e;
+                 border: 1px solid lightgray;
+                 position: relative;
+                 float: left;
+             }
+
+             
+
+             
+
+             
+        </style>
+    </head>
+
+
+    <body>
+        <div class="card" style="width: 100%">
+            
+            
+            <div id="mynetwork" class="card-body"></div>
+        </div>
+
+        
+        
+
+        <script type="text/javascript">
+
+              // initialize global variables.
+              var edges;
+              var nodes;
+              var allNodes;
+              var allEdges;
+              var nodeColors;
+              var originalNodes;
+              var network;
+              var container;
+              var options, data;
+              var filter = {
+                  item : '',
+                  property : '',
+                  value : []
+              };
+
+              
+
+              
+
+              // This method is responsible for drawing the graph, returns the drawn network
+              function drawGraph() {
+                  var container = document.getElementById('mynetwork');
+
+                  
+
+                  // parsing and collecting nodes and edges from the python
+                  nodes = new vis.DataSet([{"color": "hsl(179, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.58ab2b8be4b0ce4410e6cc19", "label": "USGS.58ab2b8be4b0ce4410e6cc19", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.58ab2b8be4b0ce4410e6cc19\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(227, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.5a90ac6ee4b069906067500e", "label": "USGS.5a90ac6ee4b069906067500e", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.5a90ac6ee4b069906067500e\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(139, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "USGS.58aa44d1e4b0ce4410e6c92d", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.58aa44d1e4b0ce4410e6c92d\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(344, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.5a90ade1e4b0699060675016", "label": "USGS.5a90ade1e4b0699060675016", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.5a90ade1e4b0699060675016\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(314, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.597665dfe4b0ec1a488786f3", "label": "USGS.597665dfe4b0ec1a488786f3", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.597665dfe4b0ec1a488786f3\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(313, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.58ab2b35e4b0ce4410e6cc17", "label": "USGS.58ab2b35e4b0ce4410e6cc17", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.58ab2b35e4b0ce4410e6cc17\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(204, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.5a90af89e4b0699060675025", "label": "USGS.5a90af89e4b0699060675025", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.5a90af89e4b0699060675025\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(314, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.59c294bee4b091459a61d36a", "label": "USGS.59c294bee4b091459a61d36a", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.59c294bee4b091459a61d36a\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(123, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.5978e522e4b0ec1a488a48a2", "label": "USGS.5978e522e4b0ec1a488a48a2", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.5978e522e4b0ec1a488a48a2\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(116, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.6390d584d34ed907bf7e48b3", "label": "USGS.6390d584d34ed907bf7e48b3", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.6390d584d34ed907bf7e48b3\u003c/b\u003e\n1 columns\n  T Susan Wherry"}, {"color": "hsl(178, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.5977c20ee4b0ec1a4888e4c1", "label": "USGS.5977c20ee4b0ec1a4888e4c1", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.5977c20ee4b0ec1a4888e4c1\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(7, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "USGS.58aa3116e4b0ce4410e6c8d9", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.58aa3116e4b0ce4410e6c8d9\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(318, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.59c28d22e4b091459a61d304", "label": "USGS.59c28d22e4b091459a61d304", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.59c28d22e4b091459a61d304\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(141, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.5a90ae94e4b069906067501e", "label": "USGS.5a90ae94e4b069906067501e", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.5a90ae94e4b069906067501e\u003c/b\u003e\n1 columns\n  T Petersen, Mark D."}, {"color": "hsl(182, 70%, 50%)", "font": {"color": "white"}, "id": "10-year-comparison-of-taxpayer-income", "label": "10-year-comparison-of-taxpayer-income", "shape": "dot", "size": 24, "title": "\u003cb\u003e10-year-comparison-of-taxpayer-income\u003c/b\u003e\n9 columns\n  T Number of Filers, Calendar Year 2004\n  T Number of Filers, Calendar Year 2013\n  T Percentage of Total Filers, Calendar Year 2013\n  T Percentage of Total Liability, Calendar Year 2013\n  T Percentage of Total Liabilty, Calendar Year 2004\n  T Personal Income Tax Liability, Calendar Year 2004\n  T Percentage of Total Filers, Calendar Year 2004\n  T Adjusted Gross Income Level\n  T Personal Income Tax Liability, Calendar Year 2013"}, {"color": "hsl(349, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.606db85fd34e670a7d5f61f0", "label": "USGS.606db85fd34e670a7d5f61f0", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.606db85fd34e670a7d5f61f0\u003c/b\u003e\n1 columns\n  T Rahmani, F."}, {"color": "hsl(215, 70%, 50%)", "font": {"color": "white"}, "id": "USGS.60ae84cdd34e4043c853947c", "label": "USGS.60ae84cdd34e4043c853947c", "shape": "dot", "size": 16, "title": "\u003cb\u003eUSGS.60ae84cdd34e4043c853947c\u003c/b\u003e\n1 columns\n  T Gregory, Angela"}, {"color": "hsl(196, 70%, 50%)", "font": {"color": "white"}, "id": "Table%202.%20Measured%20Vapor%20Pressures", "label": "Table%202.%20Measured%20Vapor%20Pressure", "shape": "dot", "size": 21, "title": "\u003cb\u003eTable%202.%20Measured%20Vapor%20Pressures\u003c/b\u003e\n6 columns\n  T column1\n  T column3\n  T column4\n  T #Table 2. Measured Vapor Pressures for Liquid 1,2,3,4,5,6,7,8-Octahydroanthracene\n  T column2\n  T column5"}, {"color": "hsl(191, 70%, 50%)", "font": {"color": "white"}, "id": "Table%205.%20Derived%20Enthalpies%20of%20Vaporization", "label": "Table%205.%20Derived%20Enthalpies%20of%2", "shape": "dot", "size": 19, "title": "\u003cb\u003eTable%205.%20Derived%20Enthalpies%20of%20Vaporization\u003c/b\u003e\n4 columns\n  T #Table 5. Derived Enthalpies of Vaporization .Delta._{l}^{g}H_m for 1,2,3,4,5,6,7,8 Octahydroanthracene\n  T column1\n  T column2\n  T column3"}, {"color": "hsl(292, 70%, 50%)", "font": {"color": "white"}, "id": "Table%204.%20Measured%20Densities", "label": "Table%204.%20Measured%20Densities", "shape": "dot", "size": 18, "title": "\u003cb\u003eTable%204.%20Measured%20Densities\u003c/b\u003e\n3 columns\n  T #Table 4. Measured Liquid Density at Temperature T and Vapor-Saturation Pressure .rho._{sat} for 1,2,3,4,5,6,7,8-Octahydroanthracene\n  T column1\n  T column2"}]);
+                  edges = new vis.DataSet([{"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b8be4b0ce4410e6cc19", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ac6ee4b069906067500e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.58ab2b8be4b0ce4410e6cc19", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b8be4b0ce4410e6cc19", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ade1e4b0699060675016", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b8be4b0ce4410e6cc19", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.597665dfe4b0ec1a488786f3", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b35e4b0ce4410e6cc17", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.58ab2b8be4b0ce4410e6cc19", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b8be4b0ce4410e6cc19", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b8be4b0ce4410e6cc19", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c294bee4b091459a61d36a", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b8be4b0ce4410e6cc19", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5978e522e4b0ec1a488a48a2", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b8be4b0ce4410e6cc19", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5977c20ee4b0ec1a4888e4c1", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.58ab2b8be4b0ce4410e6cc19", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b8be4b0ce4410e6cc19", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c28d22e4b091459a61d304", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b8be4b0ce4410e6cc19", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ae94e4b069906067501e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ac6ee4b069906067500e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5a90ac6ee4b069906067500e", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ade1e4b0699060675016", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.597665dfe4b0ec1a488786f3", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ac6ee4b069906067500e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b35e4b0ce4410e6cc17", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ac6ee4b069906067500e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5a90ac6ee4b069906067500e", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.59c294bee4b091459a61d36a", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ac6ee4b069906067500e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5978e522e4b0ec1a488a48a2", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ac6ee4b069906067500e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5977c20ee4b0ec1a4888e4c1", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ac6ee4b069906067500e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ac6ee4b069906067500e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.59c28d22e4b091459a61d304", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ac6ee4b069906067500e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5a90ac6ee4b069906067500e", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ae94e4b069906067501e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ade1e4b0699060675016", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.597665dfe4b0ec1a488786f3", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.58ab2b35e4b0ce4410e6cc17", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c294bee4b091459a61d36a", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5978e522e4b0ec1a488a48a2", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5977c20ee4b0ec1a4888e4c1", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.58aa44d1e4b0ce4410e6c92d", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c28d22e4b091459a61d304", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa44d1e4b0ce4410e6c92d", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ae94e4b069906067501e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.597665dfe4b0ec1a488786f3", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ade1e4b0699060675016", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b35e4b0ce4410e6cc17", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ade1e4b0699060675016", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5a90ade1e4b0699060675016", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.59c294bee4b091459a61d36a", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ade1e4b0699060675016", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5978e522e4b0ec1a488a48a2", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ade1e4b0699060675016", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5977c20ee4b0ec1a4888e4c1", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ade1e4b0699060675016", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ade1e4b0699060675016", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.59c28d22e4b091459a61d304", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ade1e4b0699060675016", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5a90ade1e4b0699060675016", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ae94e4b069906067501e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b35e4b0ce4410e6cc17", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.597665dfe4b0ec1a488786f3", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.597665dfe4b0ec1a488786f3", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.597665dfe4b0ec1a488786f3", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c294bee4b091459a61d36a", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.597665dfe4b0ec1a488786f3", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5978e522e4b0ec1a488a48a2", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.597665dfe4b0ec1a488786f3", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5977c20ee4b0ec1a4888e4c1", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.597665dfe4b0ec1a488786f3", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.597665dfe4b0ec1a488786f3", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c28d22e4b091459a61d304", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.597665dfe4b0ec1a488786f3", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ae94e4b069906067501e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b35e4b0ce4410e6cc17", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b35e4b0ce4410e6cc17", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c294bee4b091459a61d36a", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b35e4b0ce4410e6cc17", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5978e522e4b0ec1a488a48a2", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b35e4b0ce4410e6cc17", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5977c20ee4b0ec1a4888e4c1", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.58ab2b35e4b0ce4410e6cc17", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b35e4b0ce4410e6cc17", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c28d22e4b091459a61d304", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58ab2b35e4b0ce4410e6cc17", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ae94e4b069906067501e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.59c294bee4b091459a61d36a", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5978e522e4b0ec1a488a48a2", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5977c20ee4b0ec1a4888e4c1", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.59c28d22e4b091459a61d304", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5a90ae94e4b069906067501e", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90af89e4b0699060675025", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5978e522e4b0ec1a488a48a2", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c294bee4b091459a61d36a", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5977c20ee4b0ec1a4888e4c1", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c294bee4b091459a61d36a", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c294bee4b091459a61d36a", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.59c28d22e4b091459a61d304", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c294bee4b091459a61d36a", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.59c294bee4b091459a61d36a", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ae94e4b069906067501e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5977c20ee4b0ec1a4888e4c1", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5978e522e4b0ec1a488a48a2", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5978e522e4b0ec1a488a48a2", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5978e522e4b0ec1a488a48a2", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c28d22e4b091459a61d304", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5978e522e4b0ec1a488a48a2", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ae94e4b069906067501e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5977c20ee4b0ec1a4888e4c1", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5977c20ee4b0ec1a4888e4c1", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.59c28d22e4b091459a61d304", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.5977c20ee4b0ec1a4888e4c1", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "USGS.5a90ae94e4b069906067501e", "value": 1.0000000000000002, "width": 5.000000000000001}, {"color": "#2ecc71", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "USGS.58aa3116e4b0ce4410e6c8d9", "label": "1.00", "title": "CONTENT_SIM  score=1.0000", "to": "USGS.5a90ae94e4b069906067501e", "value": 1.0, "width": 5.0}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "Table%202.%20Measured%20Vapor%20Pressures", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "Table%204.%20Measured%20Densities", "value": 1.0, "width": 5.0}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "Table%202.%20Measured%20Vapor%20Pressures", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "Table%205.%20Derived%20Enthalpies%20of%20Vaporization", "value": 1.0, "width": 5.0}, {"color": "#3498db", "font": {"color": "#cccccc", "size": 10, "strokeWidth": 0}, "from": "Table%204.%20Measured%20Densities", "label": "1.00", "title": "SCHEMA_SIM  score=1.0000", "to": "Table%205.%20Derived%20Enthalpies%20of%20Vaporization", "value": 1.0, "width": 5.0}]);
+
+                  nodeColors = {};
+                  allNodes = nodes.get({ returnType: "Object" });
+                  for (nodeId in allNodes) {
+                    nodeColors[nodeId] = allNodes[nodeId].color;
+                  }
+                  allEdges = edges.get({ returnType: "Object" });
+                  // adding nodes and edges to the graph
+                  data = {nodes: nodes, edges: edges};
+
+                  var options = {
+    "configure": {
+        "enabled": false
+    },
+    "edges": {
+        "color": {
+            "inherit": true
+        },
+        "smooth": {
+            "enabled": true,
+            "type": "dynamic"
+        }
+    },
+    "interaction": {
+        "dragNodes": true,
+        "hideEdgesOnDrag": false,
+        "hideNodesOnDrag": false
+    },
+    "physics": {
+        "barnesHut": {
+            "avoidOverlap": 0,
+            "centralGravity": 0.3,
+            "damping": 0.09,
+            "gravitationalConstant": -8000,
+            "springConstant": 0.01,
+            "springLength": 200
+        },
+        "enabled": true,
+        "stabilization": {
+            "enabled": true,
+            "fit": true,
+            "iterations": 1000,
+            "onlyDynamicEdges": false,
+            "updateInterval": 50
+        }
+    }
+};
+
+                  
+
+
+                  
+
+                  network = new vis.Network(container, data, options);
+
+                  
+
+                  
+
+                  
+
+
+                  
+
+                  return network;
+
+              }
+              drawGraph();
+        </script>
+    
+<div id="weight-filter" style="position:fixed;top:10px;right:10px;z-index:9999;
+  background:rgba(26,26,46,0.95);padding:14px 18px;border-radius:8px;
+  color:#fff;font-family:sans-serif;font-size:13px;box-shadow:0 2px 12px rgba(0,0,0,0.5);">
+  <label for="weightSlider"><b>Min edge weight:</b></label>
+  <input type="range" id="weightSlider" min="0" max="1" step="0.01" value="0"
+    style="width:160px;vertical-align:middle;">
+  <span id="weightVal" style="margin-left:6px;font-weight:bold;">0.00</span>
+</div>
+<script>
+(function(){
+  var slider = document.getElementById('weightSlider');
+  var valSpan = document.getElementById('weightVal');
+  // stash original edges
+  var origEdges = null;
+  function waitForNetwork() {
+    if (typeof edges === 'undefined' || !edges) {
+      setTimeout(waitForNetwork, 200);
+      return;
+    }
+    if (!origEdges) origEdges = edges.get();
+    slider.addEventListener('input', function(){
+      var th = parseFloat(this.value);
+      valSpan.textContent = th.toFixed(2);
+      var filtered = origEdges.filter(function(e){ return (e.value || 0) >= th; });
+      edges.clear();
+      edges.add(filtered);
+    });
+  }
+  waitForNetwork();
+})();
+</script>
+
+</body>
+</html>

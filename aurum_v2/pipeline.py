@@ -6,8 +6,8 @@ Usage:
     # Profile + build from s3_list.py search results
     python -m aurum_v2.pipeline --query "veterans disability" --limit 5
 
-    # Profile + build from a text file of s3:// URIs (one per line)
-    python -m aurum_v2.pipeline --uri-file verified_s3_tables.txt
+    # Profile + build the FIRST 100 tables from a text file of s3:// URIs
+    python -m aurum_v2.pipeline --uri-file verified_s3_tables.txt --n-files 100
 
     # Profile + build from explicit URIs
     python -m aurum_v2.pipeline --uris s3://bucket/path1.csv s3://bucket/path2.csv
@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from aurum_v2.config import AurumConfig
 from aurum_v2.profiler.column_profiler import Profiler
-from aurum_v2.profiler.source_readers import S3Reader, SourceConfig, discover_sources
+from aurum_v2.profiler.source_readers import S3Reader
 from aurum_v2.store.duck_store import DuckStore
 from aurum_v2.builder.coordinator import build_network
 
@@ -69,14 +69,18 @@ def resolve_uris_from_query(query: str, limit: int = 5) -> list[str]:
     return uris
 
 
-def load_uris_from_file(path: str) -> list[str]:
-    """Read one s3:// URI per line from a text file."""
+def load_uris_from_file(path: str, n_files: int | None = None) -> list[str]:
+    """Read s3:// URIs from a text file, optionally limiting to n_files."""
     uris = []
     with open(path) as f:
         for line in f:
             line = line.strip()
             if line and line.startswith("s3://"):
                 uris.append(line)
+                # Stop reading early if we hit the requested limit
+                if n_files and len(uris) >= n_files:
+                    break
+                    
     logger.info("Loaded %d URIs from %s", len(uris), path)
     return uris
 
@@ -97,13 +101,13 @@ def stage_profile(
     """Stage 1: Profile S3 tables → DuckDB."""
     t0 = time.time()
 
+    # Pass the standardized S3Reader parameters
     reader = S3Reader(
         db_name="s3",
         s3_paths=uris,
         region=region,
-        sample_rows=sample_rows,
-        limit_text_values=config.limit_text_values,
-        max_text_values=config.max_text_values,
+        limit_values=True, # Force sampling so we don't blow up memory
+        max_values=sample_rows,
     )
 
     profiler = Profiler(config)
@@ -145,8 +149,9 @@ def main():
     src.add_argument("--uris", nargs="+", help="Explicit s3:// URIs")
     src.add_argument("--rebuild", action="store_true", help="Rebuild graph from existing DuckDB (skip profiling)")
 
+    parser.add_argument("--n-files", type=int, default=None, help="Max number of S3 URIs to process from the file or list")
     parser.add_argument("--limit", type=int, default=5, help="Max datasets from data.gov search (default 5)")
-    parser.add_argument("--sample-rows", type=int, default=10_000, help="Rows to Bernoulli-sample per S3 file")
+    parser.add_argument("--sample-rows", type=int, default=10_000, help="Rows to reservoir-sample per S3 file")
     parser.add_argument("--workers", type=int, default=4, help="Profiler worker processes")
     parser.add_argument("--region", type=str, default="us-east-1", help="AWS region")
     parser.add_argument("--db", type=str, default="aurum.db", help="DuckDB file path")
@@ -158,25 +163,34 @@ def main():
     model_dir = Path(args.model_dir).resolve()
 
     duck = DuckStore(config, db_path)
+    # Don't recreate the tables if we are just appending more files to an existing DB
     duck.init_tables(recreate=not args.rebuild)
 
     # ── Resolve S3 URIs ───────────────────────────────────────────────
     if args.rebuild:
         logger.info("Rebuilding graph from existing DuckDB at %s", db_path)
+        
     elif args.query:
         uris = resolve_uris_from_query(args.query, limit=args.limit)
+        if args.n_files:
+            uris = uris[:args.n_files]
+            
         if not uris:
             logger.error("No tables found. Exiting.")
             sys.exit(1)
         stage_profile(uris, config, duck, sample_rows=args.sample_rows, max_workers=args.workers, region=args.region)
+        
     elif args.uri_file:
-        uris = load_uris_from_file(args.uri_file)
+        uris = load_uris_from_file(args.uri_file, n_files=args.n_files)
         if not uris:
             logger.error("No URIs in file. Exiting.")
             sys.exit(1)
         stage_profile(uris, config, duck, sample_rows=args.sample_rows, max_workers=args.workers, region=args.region)
+        
     elif args.uris:
-        stage_profile(args.uris, config, duck, sample_rows=args.sample_rows, max_workers=args.workers, region=args.region)
+        uris = args.uris[:args.n_files] if args.n_files else args.uris
+        stage_profile(uris, config, duck, sample_rows=args.sample_rows, max_workers=args.workers, region=args.region)
+        
     else:
         parser.print_help()
         sys.exit(1)
