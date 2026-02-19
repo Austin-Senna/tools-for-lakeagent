@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from aurum_v2.models.drs import DRS
 from aurum_v2.models.hit import Hit
 from aurum_v2.models.relation import Relation, OP, Operation, DRSMode
-from aurum_v2.store.elastic_store import KWType
+from aurum_v2.store.duck_store import KWType
 
 
 if TYPE_CHECKING:
@@ -33,17 +33,15 @@ class Algebra:
     Parameters
     ----------
     network : FieldNetwork
-        The loaded column‑relation graph.
-    store_client : StoreHandler
-        Elasticsearch connection for keyword searches and path lookups.
+        The loaded column-relation graph.
+    store_client
+        Store backend — any object with ``search_keywords``, ``exact_search_keywords``.
+        Accepts ``DuckStore`` or ``ElasticStore``.
     """
 
-    def __init__(self, 
-                 network: FieldNetwork,
-                 duck: DuckStore | None = None,
-                 es: ElasticStore | None = None) -> None:
+    def __init__(self, network: FieldNetwork, store_client) -> None:
         self._network = network
-        self._store_client = duck if es is None else es
+        self._store_client = store_client
 
     # ==================================================================
     # Basic search API

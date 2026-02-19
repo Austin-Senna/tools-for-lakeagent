@@ -46,6 +46,7 @@ class AurumConfig:
     spacy_size: int = 1000
 
     # ── Text index limits ──────────────────────────────────────────────
+    limit_text_values: bool = False
     max_text_values: int = 1_000
     """Max unique values stored per column in the keyword search index."""
 

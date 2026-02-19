@@ -11,7 +11,6 @@ import requests
 from dotenv import load_dotenv
 
 BUCKET = "lakeqa-yc4103-datalake"
-# CHANGED: We now strictly limit the search to datagov
 FOLDERS = ["datagov"]
 REGION = "us-east-1"
 

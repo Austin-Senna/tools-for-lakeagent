@@ -117,8 +117,8 @@ def compute_kmin_hash(values: list[str], k: int) -> list[int]:
 # ---------------------------------------------------------------------------
 
 def compute_cardinality(values: list[str]) -> int:
-    """Approximate unique-value count via HyperLogLog (p=18, ~0.4% error)."""
-    hll = HyperLogLog(p=18)
+    """Approximate unique-value count via HyperLogLog (p=16, ~0.4% error)."""
+    hll = HyperLogLog(p=16)
     for val in values:
         hll.update(val.encode("utf-8"))
     return int(hll.count())
@@ -169,7 +169,6 @@ def profile_column(
     values: list[str],
     aurum_type: str,
     minhash_num_perm: int = 512,
-    max_text_values: int = 1_000,
     path: str = "",
 ) -> ColumnProfile:
     """Profile a single column and return a :class:`ColumnProfile`.
@@ -178,9 +177,10 @@ def profile_column(
     ----------
     minhash_num_perm : int
         Passed explicitly so worker processes don't depend on a config
-        instance (which may not pickle across ``ProcessPoolExecutor``).
-    max_text_values : int
-        Cap on unique raw values retained for keyword search.
+        instance (which may not pickle across ``ProcessPoolExecutor``.
+    values
+        Already truncated by the source reader when
+        ``config.limit_text_values`` is True.
     """
     from aurum_v2.models.hit import compute_field_id
 
@@ -197,12 +197,8 @@ def profile_column(
         db_name=db_name, source_name=table_name, field_name=column_name,
     )
 
-    # Deduplicate + cap raw values for the text index
-    raw_vals = (
-        list(dict.fromkeys(values))[:max_text_values]
-        if aurum_type == "T"
-        else []
-    )
+    # Store deduplicated raw values for the text index
+    raw_vals = list(dict.fromkeys(values)) if aurum_type == "T" else []
 
     return ColumnProfile(
         nid=nid,
@@ -264,7 +260,7 @@ class Profiler:
             active_futures: set[futures.Future[ColumnProfile]] = set()
             
             for reader in readers:
-                for db_name, table_name, col_name, aurum_type, values in reader.read_columns():
+                for db_name, table_name, col_name, aurum_type, values, path in reader.read_columns():
                     
                     fut = executor.submit(
                         profile_column,
@@ -274,7 +270,7 @@ class Profiler:
                         values=values,
                         aurum_type=aurum_type,
                         minhash_num_perm=cfg.minhash_num_perm,
-                        max_text_values=cfg.max_text_values,
+                        path=path,
                     )
                     active_futures.add(fut)
                     

@@ -1,10 +1,10 @@
 """
-Public‑facing API class + ``init_system`` convenience function.
+Public-facing API class + ``init_system`` convenience functions.
 
 ``API`` is a thin subclass of :class:`Algebra` that exposes the same
-interface.  ``Helper`` provides reverse‑lookup and path utilities.
+interface.  ``Helper`` provides reverse-lookup and path utilities.
 
-Direct port of ``algebra.py::API`` / ``Helper`` and ``main.py::init_system``.
+Supports both DuckDB (zero-infrastructure) and Elasticsearch backends.
 """
 
 from __future__ import annotations
@@ -13,18 +13,17 @@ from typing import TYPE_CHECKING
 
 from aurum_v2.discovery.algebra import Algebra
 from aurum_v2.graph.field_network import FieldNetwork, deserialize_network
-from aurum_v2.store.elastic_store import StoreHandler
 
 if TYPE_CHECKING:
     from aurum_v2.config import AurumConfig
 
-__all__ = ["API", "Helper", "init_system"]
+__all__ = ["API", "Helper", "init_system", "init_system_duck"]
 
 
 class Helper:
-    """Utility class for reverse lookups and file‑path resolution."""
+    """Utility class for reverse lookups and file-path resolution."""
 
-    def __init__(self, network: FieldNetwork, store_client: StoreHandler) -> None:
+    def __init__(self, network: FieldNetwork, store_client) -> None:
         self._network = network
         self._store_client = store_client
 
@@ -34,40 +33,55 @@ class Helper:
 
     def get_path_nid(self, nid: str) -> str:
         """Resolve the filesystem path for the data source containing *nid*."""
-        return self._store_client.get_path_of(nid)
+        if hasattr(self._store_client, "get_path_of"):
+            return self._store_client.get_path_of(nid)
+        return ""
 
 
 class API(Algebra):
-    """Top‑level API — inherits all :class:`Algebra` methods.
+    """Top-level API — inherits all :class:`Algebra` methods.
 
     Also attaches a :class:`Helper` instance as ``self.helper``.
     """
 
-    def __init__(self, network: FieldNetwork, store_client: StoreHandler) -> None:
+    def __init__(self, network: FieldNetwork, store_client) -> None:
         super().__init__(network, store_client)
         self.helper = Helper(network, store_client)
 
 
 def init_system(model_path: str, config: AurumConfig | None = None) -> API:
-    """Load a serialised model and return a ready‑to‑use :class:`API`.
+    """Load model + Elasticsearch store.  Requires ``elasticsearch`` package."""
+    if config is None:
+        from aurum_v2.config import AurumConfig
+        config = AurumConfig()
+
+    network = deserialize_network(model_path)
+    from aurum_v2.store.elastic_store import StoreHandler
+    store = StoreHandler(config)
+    return API(network, store)
+
+
+def init_system_duck(
+    model_path: str,
+    db_path: str = "aurum.db",
+    config: AurumConfig | None = None,
+) -> API:
+    """Load model + DuckDB store.  No external services needed.
 
     Parameters
     ----------
     model_path : str
         Directory containing ``graph.pickle``, ``id_info.pickle``, etc.
+    db_path : str
+        Path to the DuckDB ``.db`` file.
     config : AurumConfig | None
         If ``None``, a default :class:`AurumConfig` is created.
-
-    Returns
-    -------
-    API
-        Fully initialised discovery API backed by the loaded network and
-        an Elasticsearch connection.
     """
     if config is None:
         from aurum_v2.config import AurumConfig
         config = AurumConfig()
 
     network = deserialize_network(model_path)
-    store = StoreHandler(config)
+    from aurum_v2.store.duck_store import DuckStore
+    store = DuckStore(config, db_path)
     return API(network, store)

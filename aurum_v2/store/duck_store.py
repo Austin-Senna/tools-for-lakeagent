@@ -241,47 +241,60 @@ class DuckStore:
     # Retrieval — used by network-building pipeline
     # ==================================================================
 
+    _FETCH_CHUNK = 10_000
+
     def get_all_fields_name(self) -> Iterator[tuple[str, str]]:
-        """Stream ``profile`` table directly from the DuckDB cursor."""
+        """Chunked streaming of ``(nid, column_name)`` from profile."""
         cursor = self._con.execute(
-            "SELECT nid, column_name"
-            "  FROM profile"
+            "SELECT nid, column_name FROM profile"
         )
-        # Iterate directly over the cursor! No fetchall()
-        for row in cursor:
-            yield row
+        while True:
+            chunk = cursor.fetchmany(self._FETCH_CHUNK)
+            if not chunk:
+                break
+            yield from chunk
 
     def get_all_fields(self) -> Iterator[tuple[str, str, str, str, int, int, str]]:
-        """Stream ``profile`` table directly from the DuckDB cursor."""
+        """Chunked streaming of full field metadata from profile."""
         cursor = self._con.execute(
             "SELECT nid, db_name, source_name, column_name,"
             "       total_values, unique_values, data_type"
             "  FROM profile"
         )
-        # Iterate directly over the cursor! No fetchall()
-        for row in cursor:
-            yield row
+        while True:
+            chunk = cursor.fetchmany(self._FETCH_CHUNK)
+            if not chunk:
+                break
+            yield from chunk
 
     def get_all_mh_text_signatures(self) -> Iterator[tuple[str, list[int]]]:
-        """Yield ``(nid, minhash_array)`` for all text columns."""
+        """Chunked streaming of ``(nid, minhash_array)`` for text columns."""
         cursor = self._con.execute(
             "SELECT nid, minhash FROM profile"
             " WHERE data_type = 'T' AND minhash IS NOT NULL"
         )
-        for nid, mh in cursor:
-            if mh:
-                yield (nid, list(mh))
+        while True:
+            chunk = cursor.fetchmany(self._FETCH_CHUNK)
+            if not chunk:
+                break
+            for nid, mh in chunk:
+                if mh:
+                    yield (nid, list(mh))
 
     def get_all_fields_num_signatures(
         self,
     ) -> Iterator[tuple[str, tuple[float, float, float, float]]]:
-        """Yield ``(nid, (median, iqr, min_val, max_val))`` for numeric cols."""
+        """Chunked streaming of ``(nid, (median, iqr, min, max))`` for numeric cols."""
         cursor = self._con.execute(
             "SELECT nid, median, iqr, min_value, max_value"
             "  FROM profile WHERE data_type = 'N'"
         )
-        for nid, med, iq, mn, mx in cursor:
-            yield (nid, (med, iq, mn, mx))
+        while True:
+            chunk = cursor.fetchmany(self._FETCH_CHUNK)
+            if not chunk:
+                break
+            for nid, med, iq, mn, mx in chunk:
+                yield (nid, (med, iq, mn, mx))
 
     # ==================================================================
     # Keyword search — DuckDB FTS (used by Algebra / API)
@@ -382,6 +395,17 @@ class DuckStore:
         for nid, db, src, col in rows:
             yield Hit(nid=nid, db_name=db, source_name=src,
                       field_name=col, score=1.0)
+
+    # ==================================================================
+    # Path resolution
+    # ==================================================================
+
+    def get_path_of(self, nid: str) -> str:
+        """Return the data-source path (S3 URI or local) for column *nid*."""
+        row = self._con.execute(
+            "SELECT path FROM profile WHERE nid = ? LIMIT 1", [nid],
+        ).fetchone()
+        return row[0] if row and row[0] else ""
 
     def close(self) -> None:
         """Close the DuckDB connection."""

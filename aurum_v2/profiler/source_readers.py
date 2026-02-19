@@ -68,11 +68,12 @@ class SourceConfig:
 class SourceReader(Protocol):
     """Protocol all source readers must satisfy."""
 
-    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str]]]:
-        """Yield ``(db_name, table_name, column_name, aurum_type, values)`` per column.
+    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str], str]]:
+        """Yield ``(db_name, table_name, column_name, aurum_type, values, path)`` per column.
 
         *aurum_type* is 'N' (Numeric) or 'T' (Text).
         *values* is a list of string-coerced cell values for that column.
+        *path* is the data-source path (S3 URI, file path, or connection string).
         The profiler uses these to compute statistics and signatures.
         """
         ...
@@ -105,16 +106,18 @@ class CSVReader:
         directory: str | Path,
         separator: str = ",",
         encoding: str = "utf-8",
+        limit_text_values: bool = False,
         max_text_values: int = 1_000,
     ) -> None:
         self.db_name = db_name
         self.directory = Path(directory)
         self.separator = separator
         self.encoding = encoding
+        self.limit_text_values = limit_text_values
         self.max_text_values = max_text_values
 
-    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str]]]:
-        """Yield ``(db_name, table_name, column_name, aurum_type, values)`` for every column
+    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str], str]]:
+        """Yield ``(db_name, table_name, column_name, aurum_type, values, path)`` for every column
         in every CSV file under :attr:`directory`.
         """
         csv_files = sorted(self.directory.glob("*.csv"))
@@ -142,7 +145,9 @@ class CSVReader:
                     is_numeric = pd.api.types.is_numeric_dtype(chunk_df[col_name].dtype)
                     aurum_type = "N" if is_numeric else "T"
                     values = chunk_df[col_name].dropna().astype(str).tolist()
-                    yield self.db_name, table_name, str(col_name), aurum_type, values
+                    if self.limit_text_values and aurum_type == "T":
+                        values = values[:self.max_text_values]
+                    yield self.db_name, table_name, str(col_name), aurum_type, values, str(csv_path)
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +179,7 @@ class DatabaseReader:
         self.schema = schema
         self.db_type = db_type
 
-    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str]]]:
+    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str], str]]:
         # 1. Spin up an in-memory DuckDB instance
         con = duckdb.connect()
 
@@ -203,7 +208,9 @@ class DatabaseReader:
                 is_numeric = pd.api.types.is_numeric_dtype(df[col_name].dtype)
                 aurum_type = "N" if is_numeric else "T"
                 values = df[col_name].dropna().astype(str).tolist()
-                yield self.db_name, table_name, str(col_name), aurum_type, values
+                yield self.db_name, table_name, str(col_name), aurum_type, values, self.connection_string
+                # Note: DatabaseReader doesn't limit text values — config-driven
+                # truncation is handled by CSVReader/S3Reader which accept the flag.
 
         con.close()
         
@@ -236,12 +243,14 @@ class S3Reader:
         s3_paths: list[str],
         region: str = "us-east-2",
         sample_rows: int = 10_000,
+        limit_text_values: bool = False,
         max_text_values: int = 1_000,
     ) -> None:
         self.db_name = db_name
         self.s3_paths = s3_paths
         self.region = region
         self.sample_rows = sample_rows
+        self.limit_text_values = limit_text_values
         self.max_text_values = max_text_values
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
@@ -249,21 +258,37 @@ class S3Reader:
         con.execute("INSTALL httpfs;")
         con.execute("LOAD httpfs;")
         con.execute(f"SET s3_region='{self.region}';")
+
+        # Try env vars first, then fall back to boto3 credential chain
+        # (covers ~/.aws/credentials, IAM roles, SSO, etc.)
         access_key = os.getenv('AWS_ACCESS_KEY_ID')
         secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
-        
-        con.execute(f"SET s3_region='{self.region}';")
+
+        if not (access_key and secret_key):
+            try:
+                import boto3
+                session = boto3.Session()
+                creds = session.get_credentials()
+                if creds:
+                    frozen = creds.get_frozen_credentials()
+                    access_key = frozen.access_key
+                    secret_key = frozen.secret_key
+                    token = frozen.token
+                    if token:
+                        con.execute(f"SET s3_session_token='{token}';")
+            except Exception:
+                pass
+
         if access_key and secret_key:
             con.execute(f"SET s3_access_key_id='{access_key}';")
             con.execute(f"SET s3_secret_access_key='{secret_key}';")
-            
         return con
 
     @staticmethod
     def _table_name_from_path(path: str) -> str:
         return Path(path).stem
 
-    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str]]]:
+    def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str], str]]:
         con = self._connect()
 
         for path in self.s3_paths:
@@ -273,7 +298,7 @@ class S3Reader:
             try:
                 query = (
                     f"SELECT * FROM read_csv_auto(?)"
-                    f" USING SAMPLE {self.sample_rows} ROWS (bernoulli)"
+                    f" USING SAMPLE {self.sample_rows} ROWS (reservoir)"
                 )
                 df = con.execute(query, [path]).df()
             except Exception:
@@ -285,6 +310,8 @@ class S3Reader:
                 is_numeric = pd.api.types.is_numeric_dtype(series.dtype)
                 aurum_type = "N" if is_numeric else "T"
                 values = series.dropna().astype(str).tolist()
+                if self.limit_text_values and aurum_type == "T":
+                    values = values[:self.max_text_values]
 
                 yield (
                     self.db_name,
@@ -292,6 +319,7 @@ class S3Reader:
                     str(col_name),
                     aurum_type,
                     values,
+                    path,
                 )
 
         con.close()
@@ -314,16 +342,18 @@ def discover_sources(configs: list[SourceConfig]) -> list[SourceReader]:
                     directory=cfg.config.get("path", "."),
                     separator=cfg.config.get("separator", ","),
                     encoding=cfg.config.get("encoding", "utf-8"),
+                    limit_text_values=cfg.config.get("limit_text_values", False),
+                    max_text_values=cfg.config.get("max_text_values", 1_000),
                 )
             )
         elif cfg.source_type == "s3":
             readers.append(
                 S3Reader(
-                    # add a flag
                     db_name=cfg.name,
                     s3_paths=cfg.config["s3_paths"],
                     region=cfg.config.get("region", "us-east-2"),
                     sample_rows=cfg.config.get("sample_rows", 10_000),
+                    limit_text_values=cfg.config.get("limit_text_values", False),
                     max_text_values=cfg.config.get("max_text_values", 1_000),
                 )
             )

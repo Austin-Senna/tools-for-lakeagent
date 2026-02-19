@@ -11,7 +11,7 @@ Quick start::
     drs = api.search_content("salary")
 """
 
-from aurum_v2.discovery.api import API, init_system
+from aurum_v2.discovery.api import API, init_system, init_system_duck
 
-__all__ = ["API", "init_system"]
+__all__ = ["API", "init_system", "init_system_duck"]
 __version__ = "2.0.0"
