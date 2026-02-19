@@ -268,24 +268,51 @@ Agent reasoning:
 | Aspect | Status |
 |--------|--------|
 | **Is aurum_v2 the right foundation?** | ✅ Yes — the discover→build→query→join pipeline is exactly what's needed |
-| **Is it complete enough to use today?** | ❌ No — all core methods are `raise NotImplementedError` stubs |
-| **What's critically missing?** | S3Reader, implemented methods (search/join/filter/path), DataFrame query tool |
+| **Is it complete enough to use today?** | 🟡 Partial — core algebra/models/graph/profiler/store are implemented; DoD/analysis are stubs |
+| **What's critically missing?** | DoD pipeline, analysis.py functions, join_utils, view_analysis |
 | **What's unnecessary?** | Annotation system, reporting, EKG/Neo4j, sugar, ontomatch |
 | **Biggest risk at 9.5 TB scale?** | ES text index size (need sampling), join materialization memory (need chunking — designed but unimplemented), profiling time (need parallelism) |
-| **Modules to implement first?** | 1) Profiler (S3 variant) 2) StoreHandler 3) FieldNetwork graph ops 4) Algebra search+paths 5) join_utils 6) DoD pipeline |
+| **Modules to implement first?** | 1) analysis.py functions 2) join_utils 3) DoD pipeline 4) view_analysis |
 
-### Priority Implementation Order
+---
+
+## 8  Implementation Status (as of 2026-02-18)
+
+### ✅ FULLY IMPLEMENTED (working code, tested)
+
+| Module | File(s) | Status |
+|--------|---------|--------|
+| **Models** | `hit.py`, `drs.py`, `relation.py`, `provenance.py`, `annotation.py` | All core logic working. Bug fixes applied: Hash, iterator, intersection, certainty, provenance thread-safety. |
+| **Algebra** | `discovery/algebra.py` | All methods implemented: search, exact_search, _neighbor_search, traverse (BFS), paths (Cartesian), intersection/union/difference, make_drs, _general_to_drs, all type-dispatch helpers. |
+| **API / init_system** | `discovery/api.py` | `Helper`, `API(Algebra)`, `init_system()` all implemented. |
+| **Store — Elasticsearch** | `store/elastic_store.py` | `ElasticStore` class with search_keywords, exact_search, get_all_fields, get_all_fields_name, bulk_insert_profiles, suggest. |
+| **Store — DuckDB** | `store/duck_store.py` | `DuckStore` class with search_keywords, exact_search, bulk_insert_profiles, minhash_query. |
+| **Graph** | `graph/field_network.py` | `FieldNetwork` with init_meta_schema, add_relation, neighbors_id, find_path_hit, find_path_table, serialize/deserialize. |
+| **Builder — network_builder** | `builder/network_builder.py` | All 4 edge builders: `build_schema_sim_relation` (TF-IDF + NearPy), `build_content_sim_mh_text` (MinHash LSH), `build_content_sim_num_overlap` (IQR + DBSCAN), `build_pkfk_relation`. |
+| **Builder — coordinator** | `builder/coordinator.py` | `build_network()` orchestrating full pipeline. |
+| **Profiler** | `profiler/column_profiler.py` | `Profiler.run()` with ProcessPoolExecutor, dual-store output. `profile_column`, `compute_kmin_hash`, `compute_cardinality`, `compute_numeric_stats`. |
+| **Source readers** | `profiler/source_readers.py` | CSVReader, DatabaseReader, S3Reader, discover_sources factory. |
+| **Config** | `config.py` | `AurumConfig` dataclass with all thresholds. |
+| **Utils** | `utils/io_utils.py`, `utils/text_utils.py` | Pickle serde, CamelCase/tokenization. |
+
+### 🔴 ALL STUBS (52 `raise NotImplementedError`)
+
+| Module | File | Stub Count | Legacy Source |
+|--------|------|-----------|---------------|
+| **analysis.py** | `builder/analysis.py` | 13 | `dataanalysis/dataanalysis.py` |
+| **join_utils.py** | `dod/join_utils.py` | 15 | `DoD/data_processing_utils.py` + `DoD/utils.py` |
+| **dod.py** | `dod/dod.py` | 12 | `DoD/dod.py` |
+| **view_analysis.py** | `dod/view_analysis.py` | 8 | `DoD/material_view_analysis.py` |
+| **drs.py** | `models/drs.py` | 3 | `api/apiutils.py` (visualize_provenance, print_*_with_scores) |
+| **dod.py module-level** | `dod/dod.py` | 3 | `DoD/data_processing_utils.py` (rank_*, obtain_table_paths) |
+| **Total** | | **52** stubs remaining | |
+
+### Priority Implementation Order (revised)
 
 | Priority | Module | Effort | Impact |
 |----------|--------|--------|--------|
-| **P0** | `profiler/` — implement + add S3Reader | Large | Without this, no data in ES |
-| **P0** | `store/elastic_store.py` — implement all methods | Medium | Agent can't search without this |
-| **P0** | `graph/field_network.py` — implement init_meta_schema, add_relation, neighbors_id, find_path_hit | Medium | Agent can't navigate relationships |
-| **P0** | `discovery/algebra.py` — implement search, _neighbor_search, paths, make_drs | Medium | Agent's primary interface |
-| **P1** | `builder/` — implement all 4 build functions + analysis.py | Large | Graph edges won't exist without this |
-| **P1** | `dod/join_utils.py` — implement read_relation, apply_filter, join_ab_on_key_optimizer, materialize_join_graph | Medium | Agent can't materialize joins |
-| **P1** | `dod/dod.py` — implement virtual_schema_iterative_search | Large | The "one-shot" power tool |
-| **P2** | `models/drs.py` — implement set ops, provenance | Medium | Needed for intersection/union queries |
-| **P2** | `dod/view_analysis.py` — implement 4C classification | Small | Dedup multiple results |
-| **P3** | New: `run_pandas_query` tool | Small | Agent needs arbitrary DataFrame ops |
-| **P3** | New: Agent tool wrapper layer | Medium | Translate Aurum APIs into clean tool interfaces |
+| **P0** | `builder/analysis.py` — 13 functions | Medium | Network builder already calls these; they're the statistical guts |
+| **P1** | `dod/join_utils.py` — 15 functions | Medium | Agent can't materialize joins without this |
+| **P1** | `dod/dod.py` — 12 methods | Large | The "one-shot" power tool for multi-hop queries |
+| **P2** | `dod/view_analysis.py` — 8 functions | Small | Dedup multiple candidate views |
+| **P3** | `models/drs.py` — 3 display methods | Trivial | Nice-to-have display |
