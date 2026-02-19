@@ -109,7 +109,6 @@ def build_schema_sim_relation(
         lsh.index(vec, nid)
 
     # 4. Query and connect nodes (reuse cached dense vectors)
-    
     for i, nid in enumerate(nids):
         neighbors = lsh.query(dense_vectors[i])
         

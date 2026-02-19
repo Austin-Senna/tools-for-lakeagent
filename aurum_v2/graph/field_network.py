@@ -21,6 +21,7 @@ import networkx as nx
 from aurum_v2.models.drs import DRS
 from aurum_v2.models.hit import Hit
 from aurum_v2.models.relation import OP, Relation, Operation
+from aurum_v2.discovery.algebra import Algebra
 import logging 
 
 logger = logging.getLogger(__name__)
@@ -279,7 +280,7 @@ class FieldNetwork:
         source: Hit,
         target: Hit,
         relation: Relation,
-        api: object,
+        api: Algebra,
         max_hops: int = 3,
         lean_search: bool = False,
     ) -> DRS:
