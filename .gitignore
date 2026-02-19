@@ -26,6 +26,6 @@ htmlcov/
 tmp/
 .lake_index/
 # models/
-aurum_v2/*.json
-aurum_v2/*.jsonl
+s3_loader/*.json
+s3_loader/*.jsonl
 aurum_v2/.sandbox
