@@ -14,7 +14,6 @@ This is a line‑for‑line logic port of the legacy ``DRS`` class in
 """
 
 from __future__ import annotations
-from dataclasses import asdict
 
 from collections import defaultdict
 from enum import Enum
@@ -26,6 +25,36 @@ from aurum_v2.models.provenance import Provenance
 from aurum_v2.models.relation import DRSMode, Operation, OP
 
 __all__ = ["DRS"]
+
+
+class _DRSIterator:
+    """Separate iterator so nested ``for x in drs: for y in drs:`` works."""
+
+    def __init__(self, drs: DRS) -> None:
+        self._drs = drs
+        self._idx = 0
+        # snapshot mode and build table view once if needed
+        self._mode = drs._mode
+        if self._mode == DRSMode.TABLE:
+            if not drs._table_view:
+                seen: set[str] = set()
+                drs._table_view = [
+                    h.source_name for h in drs._data
+                    if not (h.source_name in seen or seen.add(h.source_name))  # type: ignore[func-returns-value]
+                ]
+            self._items: list = drs._table_view
+        else:
+            self._items = drs._data
+
+    def __iter__(self) -> _DRSIterator:
+        return self
+
+    def __next__(self) -> Hit | str:
+        if self._idx < len(self._items):
+            item = self._items[self._idx]
+            self._idx += 1
+            return item
+        raise StopIteration
 
 
 class DRS:
@@ -84,32 +113,8 @@ class DRS:
     # Iteration (fields or table mode)
     # ------------------------------------------------------------------
 
-    def __iter__(self) -> DRS:
-        return self
-
-    def __next__(self) -> Hit | str:
-        """Yield the next element according to the current mode."""
-        if self._mode == DRSMode.FIELDS:
-            if self._idx < len(self._data):
-                item = self._data[self._idx]
-                self._idx += 1
-                return item
-            self._idx = 0
-            raise StopIteration
-        elif self._mode == DRSMode.TABLE:
-            if not self._table_view:
-                # Lazy load unique tables preserving insertion order
-                seen = set()
-                self._table_view = [
-                    h.source_name for h in self._data 
-                    if not (h.source_name in seen or seen.add(h.source_name))
-                ]
-            if self._idx_table < len(self._table_view):
-                item_table = self._table_view[self._idx_table]
-                self._idx_table += 1
-                return item_table
-            self._idx_table = 0
-            raise StopIteration
+    def __iter__(self) -> _DRSIterator:
+        return _DRSIterator(self)
     # ------------------------------------------------------------------
     # Data access
     # ------------------------------------------------------------------
@@ -204,13 +209,21 @@ class DRS:
         result = DRS([], Operation(OP.NONE))
         
         if drs.mode == DRSMode.TABLE:
-            my_tables = {h.source_name: h for h in self._data}
-            their_tables = {h.source_name: h for h in drs.data}
+            # Collect ALL hits per table (not just one)
+            my_tables: dict[str, list[Hit]] = defaultdict(list)
+            for h in self._data:
+                my_tables[h.source_name].append(h)
+            their_tables: dict[str, list[Hit]] = defaultdict(list)
+            for h in drs.data:
+                their_tables[h.source_name].append(h)
             shared_tables = set(my_tables.keys()).intersection(their_tables.keys())
             
-            new_data = []
+            new_data: list[Hit] = []
             for t in shared_tables:
-                new_data.extend([my_tables[t], their_tables[t]])
+                new_data.extend(my_tables[t])
+                new_data.extend(their_tables[t])
+            # Deduplicate (same hit may appear in both)
+            new_data = list(set(new_data))
         else:
             new_data = list(set(self._data).intersection(set(drs.data)))
 
@@ -295,7 +308,6 @@ class DRS:
         result node upward.  When a fork is encountered the branch with
         the maximum score is chosen.
         """
-        """Traverse reversed provenance graph to aggregate edge scores."""
         if not self._provenance:
             return
             
@@ -317,12 +329,13 @@ class DRS:
             return current_score + max_branch
 
         pg_reversed = self._provenance.prov_graph().reverse(copy=False)
-        visited: set[Hit] = set()
         
         for el in self._data:
-            if el not in visited:
-                score = get_score(pg_reversed, el, visited)
-                self._rank_data[el]['certainty_score'] = score
+            # Each element gets its OWN visited set so traversal for one
+            # element does not block another from scoring through shared nodes.
+            visited: set[Hit] = set()
+            score = get_score(pg_reversed, el, visited)
+            self._rank_data[el]['certainty_score'] = score
 
     def _compute_coverage_scores(self) -> None:
         """Rank by the fraction of origin leaves that led to this result."""
@@ -384,16 +397,15 @@ class DRS:
             table = x.source_name
             if table not in sources:
                 sources[table] = {
-                    'source_res': asdict(x),  # <--- Modern safely converts dataclass to dict
+                    'source_res': x._asdict(),
                     'field_res': []
                 }
-            sources[table]['field_res'].append(asdict(x))
+            sources[table]['field_res'].append(x._asdict())
 
         edges = []
         if self._provenance:
-            # Modern edge extraction
             for u, v in self._provenance.prov_graph().edges():
-                edges.append((asdict(u), asdict(v)))
+                edges.append((u._asdict(), v._asdict()))
 
         self._mode = original_mode
         return {'sources': sources, 'edges': edges}
@@ -433,9 +445,12 @@ class DRS:
 
     def pretty_print_columns(self) -> None:
         original = self._mode
-        self.set_table_mode()
+        self.set_fields_mode()
+        seen: set[str] = set()
         for x in self:
-            print(f"DB: {x.db_name:20} TABLE: {x.source_name:30} FIELD: {x.field_name:30}")
+            if x.nid not in seen:
+                print(f"DB: {x.db_name:20} TABLE: {x.source_name:30} FIELD: {x.field_name:30}")
+                seen.add(x.nid)
         self._mode = original
 
     def pretty_print_columns_with_scores(self) -> None:

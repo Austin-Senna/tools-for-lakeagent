@@ -265,7 +265,7 @@ class FieldNetwork:
         prev_hit = found_path[0]
         for current_hit in found_path[1:]:
             step_drs = DRS([current_hit], Operation(op_type, params=[prev_hit]))
-            o_drs = o_drs.absorb_provenance(step_drs) 
+            o_drs = o_drs.absorb(step_drs)
             prev_hit = current_hit
             
         return o_drs
@@ -364,7 +364,10 @@ class FieldNetwork:
             # Step B: The intra-table jump (e.g., TABLE linking column A to column B)
             if current_inbound.nid != current_outbound.nid:
                 table_drs = DRS([current_outbound], Operation(OP.TABLE, params=[current_inbound]))
-                o_drs = o_drs.absorb_provenance(table_drs)
+                o_drs = o_drs.absorb(table_drs)
+            else:
+                # Same column — just merge the data in
+                o_drs = o_drs.absorb(jump_drs)
                 
             prev_outbound = current_outbound
             

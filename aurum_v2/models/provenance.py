@@ -14,19 +14,18 @@ This is a faithful port of the ``Provenance`` class in the legacy
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import itertools
 
 import networkx as nx
 
 from aurum_v2.models.relation import OP
-
-if TYPE_CHECKING:
-    from aurum_v2.models.hit import Hit
+from aurum_v2.models.hit import Hit
 
 __all__ = ["Provenance"]
 
 # Module‑level counter that guarantees globally unique synthetic origin IDs.
-_global_origin_id: int = 0
+# Thread-safe: itertools.count is implemented in C and is atomic.
+_global_origin_counter = itertools.count()
 
 
 class Provenance:
@@ -83,14 +82,13 @@ class Provenance:
                 self._p_graph.add_node(element)
                 
         elif op in {OP.KW_LOOKUP, OP.SCHNAME_LOOKUP, OP.ENTITY_LOOKUP}:
-            global _global_origin_id
+            origin_id = next(_global_origin_counter)
             # Create a synthetic origin Hit to represent the user's text search
             kw = str(params[0]) if params else "unknown"
             synthetic_hit = Hit(
-                nid=f"synthetic_origin_{_global_origin_id}",
+                nid=f"synthetic_origin_{origin_id}",
                 db_name=kw, source_name=kw, field_name=kw, score=-1.0
             )
-            _global_origin_id += 1
             
             self._p_graph.add_node(synthetic_hit)
             for element in data:

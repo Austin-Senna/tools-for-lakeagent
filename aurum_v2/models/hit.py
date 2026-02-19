@@ -62,7 +62,7 @@ class Hit(_BaseHit):
 
     # Identity is determined *solely* by the column id.
     def __hash__(self) -> int:  # noqa: D105
-        return int(self.nid)
+        return hash(self.nid)
 
     def __eq__(self, other: object) -> bool:  # noqa: D105
         if isinstance(other, int):

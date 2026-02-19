@@ -310,6 +310,7 @@ def discover_sources(configs: list[SourceConfig]) -> list[SourceReader]:
         elif cfg.source_type == "s3":
             readers.append(
                 S3Reader(
+                    # add a flag
                     db_name=cfg.name,
                     s3_paths=cfg.config["s3_paths"],
                     region=cfg.config.get("region", "us-east-2"),

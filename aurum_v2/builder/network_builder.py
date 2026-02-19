@@ -101,18 +101,17 @@ def build_schema_sim_relation(
     num_features = tfidf_matrix.shape[1]
     lsh = _LSHIndex(num_features=num_features)
 
-    # 3. Index vectors into NearPy
-    # We iterate by index so we can pull the exact vector for the exact nid
+    # 3. Index vectors into NearPy and cache dense arrays
+    dense_vectors: list[np.ndarray] = []
     for i, nid in enumerate(nids):
-        # Convert sparse matrix row to a dense 1D numpy array for NearPy
         vec = tfidf_matrix[i].todense().A[0]
+        dense_vectors.append(vec)
         lsh.index(vec, nid)
 
-    # 4. Query and connect nodes
+    # 4. Query and connect nodes (reuse cached dense vectors)
     
     for i, nid in enumerate(nids):
-        vec = tfidf_matrix[i].todense().A[0]
-        neighbors = lsh.query(vec)
+        neighbors = lsh.query(dense_vectors[i])
         
         # NearPy returns a list of (data, key, distance)
         for _, r_nid, distance in neighbors:
@@ -237,6 +236,14 @@ def build_content_sim_relation_num_overlap_distr(
         for cand_domain, cand_nid, cand_min, cand_left, cand_right, cand_max in entries:
             if cand_nid == ref_nid:
                 continue
+            if cand_domain == 0:
+                continue
+            
+            # Early termination: entries are sorted descending by domain.
+            # If the candidate domain is so small that even full containment
+            # can't reach the overlap threshold, skip the rest.
+            if cand_domain / ref_domain < overlap_th:
+                break
             
             # Content Similarity Check
             actual_overlap = compute_overlap(ref_left, ref_right, cand_left, cand_right)

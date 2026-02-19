@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from collections.abc import Iterator
 from enum import Enum
 from pathlib import Path
@@ -310,7 +311,7 @@ class DuckStore:
                 "  JOIN profile p ON t.nid = p.nid"
                 " WHERE regexp_matches(t.text, ?)"
                 " LIMIT ?",
-                [rf"\b{keywords}\b", max_hits],
+                [rf"\b{re.escape(keywords)}\b", max_hits],
             ).fetchall()
         elif kw_type == KWType.KW_SCHEMA:
             rows = self._con.execute(

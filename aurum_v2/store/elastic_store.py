@@ -239,6 +239,13 @@ class ElasticStore:
             if mh:
                 yield (doc["_id"], mh)
 
+    def get_all_fields_name(self) -> Iterator[tuple[str, str]]:
+        """Yield ``(nid, column_name)`` for all columns."""
+        query = {"query": {"match_all": {}}}
+        for doc in helpers.scan(self._client, index="profile", query=query, _source=["columnName"]):
+            s = doc.get("_source", {})
+            yield (doc["_id"], s.get("columnName", ""))
+
     def get_all_fields_num_signatures(self) -> Iterator[tuple[str, tuple[float, float, float, float]]]:
         """Yield ``(nid, (median, iqr, min_val, max_val))`` for numeric cols safely."""
         query = {"query": {"term": {"dataType": "N"}}}
@@ -339,3 +346,7 @@ class ElasticStore:
     def close(self) -> None:
         """Close the underlying transport."""
         self._client.close()
+
+
+# Backward-compat alias used by discovery.api
+StoreHandler = ElasticStore
