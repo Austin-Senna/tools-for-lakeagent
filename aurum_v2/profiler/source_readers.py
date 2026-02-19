@@ -13,6 +13,7 @@ It streams CSVs from an S3 bucket without loading the full file into memory.
 """
 
 from __future__ import annotations
+import os 
 
 import logging
 from collections.abc import Iterator
@@ -248,6 +249,14 @@ class S3Reader:
         con.execute("INSTALL httpfs;")
         con.execute("LOAD httpfs;")
         con.execute(f"SET s3_region='{self.region}';")
+        access_key = os.getenv('AWS_ACCESS_KEY_ID')
+        secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+        
+        con.execute(f"SET s3_region='{self.region}';")
+        if access_key and secret_key:
+            con.execute(f"SET s3_access_key_id='{access_key}';")
+            con.execute(f"SET s3_secret_access_key='{secret_key}';")
+            
         return con
 
     @staticmethod

@@ -28,3 +28,4 @@ tmp/
 # models/
 aurum_v2/*.json
 aurum_v2/*.jsonl
+aurum_v2/.sandbox
