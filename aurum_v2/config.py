@@ -27,6 +27,7 @@ class AurumConfig:
     # ── MinHash LSH ────────────────────────────────────────────────────
     minhash_num_perm: int = 512
     minhash_threshold: float = 0.7
+    max_degrees: int = 100
 
     # ── DBSCAN (single‑point numerical clustering) ─────────────────────
     dbscan_eps: float = 0.1

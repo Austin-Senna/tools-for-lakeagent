@@ -136,6 +136,51 @@ def build_schema_sim_relation(
 # ======================================================================
 # 2. Content similarity — text columns  (MinHash LSH)
 # ======================================================================
+# LEGACY
+# def build_content_sim_mh_text(
+#     network: FieldNetwork,
+#     mh_signatures: Iterator[tuple[str, list]],
+#     config: AurumConfig | None = None,
+# ) -> MinHashLSH:
+#     """Build ``Relation.CONTENT_SIM`` edges for text columns.
+
+#     Algorithm:
+
+#     1. For each ``(nid, minhash_array)`` from the store, reconstruct a
+#        ``datasketch.MinHash`` object (``num_perm=512``) and insert into a
+#        ``MinHashLSH(threshold=0.7, num_perm=512)``.
+#     2. Query each object.  For every match ``r_nid ≠ nid``, add a
+#        ``CONTENT_SIM`` edge with ``score = 1``.
+
+#     Returns the ``MinHashLSH`` index for optional serialisation.
+#     """
+#     threshold = config.minhash_threshold if config else 0.7
+#     num_perm = config.minhash_num_perm if config else 512
+    
+#     lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
+#     minhashes = {}
+
+#     # 1. Reconstruct MinHash objects from the raw arrays and index them
+#     for nid, sig_array in mh_signatures:
+#         # Datasketch requires the numpy array of hash values
+#         m = MinHash(num_perm=num_perm, hashvalues=np.array(sig_array, dtype=np.uint64))
+#         lsh.insert(nid, m)
+#         minhashes[nid] = m
+
+
+#     # 2. Query the index for collisions and compute actual Jaccard similarity
+#     for nid, m in minhashes.items():
+#         result = lsh.query(m)
+#         for r_nid in result:
+#             if r_nid != nid and r_nid in minhashes:
+#                 score = m.jaccard(minhashes[r_nid])
+#                 network.add_relation(nid, r_nid, Relation.CONTENT_SIM, score)
+
+#     return lsh
+
+# ======================================================================
+# 2. Content similarity — text columns  (MinHash LSH)
+# ======================================================================
 
 def build_content_sim_mh_text(
     network: FieldNetwork,
@@ -156,9 +201,11 @@ def build_content_sim_mh_text(
     """
     threshold = config.minhash_threshold if config else 0.7
     num_perm = config.minhash_num_perm if config else 512
-    
+    max_degree = config.max_degrees if config else 500
+
     lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
     minhashes = {}
+    mh_sig_obj = []
 
     # 1. Reconstruct MinHash objects from the raw arrays and index them
     for nid, sig_array in mh_signatures:
@@ -166,64 +213,166 @@ def build_content_sim_mh_text(
         m = MinHash(num_perm=num_perm, hashvalues=np.array(sig_array, dtype=np.uint64))
         lsh.insert(nid, m)
         minhashes[nid] = m
+        mh_sig_obj.append((nid, m))
+
+    edges_added = 0
+    pruned_hubs = 0
 
     # 2. Query the index for collisions and compute actual Jaccard similarity
     for nid, m in minhashes.items():
-        result = lsh.query(m)
-        for r_nid in result:
-            if r_nid != nid and r_nid in minhashes:
-                score = m.jaccard(minhashes[r_nid])
-                network.add_relation(nid, r_nid, Relation.CONTENT_SIM, score)
+        neighbors = lsh.query(m)
 
+        if len(neighbors) > max_degree:
+            pruned_hubs += 1
+            continue
+
+        for r_nid in neighbors:
+            if r_nid != nid:
+                # Calculate the ACTUAL Jaccard similarity to give the edge a real weight
+                r_mh_obj = minhashes[r_nid]
+                score = m.jaccard(r_mh_obj)
+
+                # Final safety check: only add if score actually meets the threshold
+                if score >= threshold:
+                    network.add_relation(nid, r_nid, Relation.CONTENT_SIM, round(score, 4))
+                    edges_added += 1
+    print(f"CONTENT_SIM (Text) complete. Added {edges_added} edges. Pruned {pruned_hubs} massive hubs.")
     return lsh
-
 
 # ======================================================================
 # 3. Content similarity — numeric columns  (distribution overlap)
 # ======================================================================
+# LEGACY
+# def build_content_sim_relation_num_overlap_distr(
+#     network: FieldNetwork,
+#     id_sig: Iterator[tuple[str, tuple[float, float, float, float]]],
+#     config: AurumConfig | None = None,
+# ) -> None:
+#     """Build ``CONTENT_SIM`` and ``INCLUSION_DEPENDENCY`` edges for numeric columns.
+
+#     For each pair of numeric columns, the function checks:
+
+#     * **Content similarity**: whether the IQR‑based ranges overlap by ≥ 85 %.
+#       Three overlap cases are handled (full containment, left partial, right
+#       partial), matching legacy ``compute_overlap``.
+#     * **Inclusion dependency**: whether one column's ``[min, max]`` is entirely
+#       contained in the other's *and* the core (median ± IQR) overlap ≥ 30 %.
+#       Only positive‑valued columns are considered.
+#     * **Single‑point clustering**: columns whose IQR domain = 0 are clustered
+#       with ``DBSCAN(eps=0.1, min_samples=2)`` on their median value.  Columns
+#       in the same cluster get ``CONTENT_SIM`` edges.
+
+#     Thresholds are taken from *config* (defaults: ``num_overlap_th=0.85``,
+#     ``inclusion_dep_th=0.3``, ``dbscan_eps=0.1``).
+#     """
+#     # 1. Fetch configurations or use defaults
+#     overlap_th = config.num_overlap_th if config and hasattr(config, 'num_overlap_th') else 0.85
+#     inc_dep_th = config.inclusion_dep_th if config and hasattr(config, 'inclusion_dep_th') else 0.3
+#     dbscan_eps = config.dbscan_eps if config and hasattr(config, 'dbscan_eps') else 0.1
+
+#     def compute_overlap(ref_left: float, ref_right: float, left: float, right: float) -> float:
+#         """Calculates overlap ratio relative to the reference domain width."""
+#         ref_width = ref_right - ref_left
+#         if ref_width == 0:
+#             return 0.0
+            
+#         # Calculate geometric intersection bounds
+#         overlap_left = max(ref_left, left)
+#         overlap_right = min(ref_right, right)
+        
+#         if overlap_left < overlap_right:
+#             return (overlap_right - overlap_left) / ref_width
+#         return 0.0
+
+#     # 2. Prepare and sort domain statistics
+#     entries = []
+#     for nid, (c_median, c_iqr, c_min, c_max) in id_sig:
+#         x_left = c_median - c_iqr
+#         x_right = c_median + c_iqr
+#         domain = x_right - x_left
+#         entries.append((domain, nid, c_min, x_left, x_right, c_max))
+        
+#     # Sort descending by domain size
+#     entries.sort(reverse=True, key=lambda x: x[0])
+    
+#     single_points = []
+
+#     # 3. Compare pairs for Content Similarity and Inclusion Dependency
+#     for ref_domain, ref_nid, ref_min, ref_left, ref_right, ref_max in entries:
+#         if ref_domain == 0:
+#             # Save for DBSCAN clustering later
+#             single_points.append((ref_nid, ref_left)) 
+#             continue
+
+#         for cand_domain, cand_nid, cand_min, cand_left, cand_right, cand_max in entries:
+#             if cand_nid == ref_nid:
+#                 continue
+#             if cand_domain == 0:
+#                 continue
+            
+#             # Early termination: entries are sorted descending by domain.
+#             # If the candidate domain is so small that even full containment
+#             # can't reach the overlap threshold, skip the rest.
+#             if cand_domain / ref_domain < overlap_th:
+#                 break
+            
+#             # Content Similarity Check
+#             actual_overlap = compute_overlap(ref_left, ref_right, cand_left, cand_right)
+#             if actual_overlap >= overlap_th:
+#                 network.add_relation(cand_nid, ref_nid, Relation.CONTENT_SIM, actual_overlap)
+
+#             # Inclusion Dependency Check
+#             if not (math.isinf(ref_min) or math.isinf(ref_max) or math.isinf(cand_min) or math.isinf(cand_max)):
+#                 if cand_min >= ref_min and cand_max <= ref_max:
+#                     if cand_min >= 0: # Only positive numbers as IDs
+#                         if actual_overlap >= inc_dep_th:
+#                             network.add_relation(cand_nid, ref_nid, Relation.INCLUSION_DEPENDENCY, 1.0)
+
+#     # 4. Final clustering for single points (Domain == 0)
+#     if not single_points:
+#         return
+
+#     fields = [pt[0] for pt in single_points]
+#     medians = np.array([[pt[1]] for pt in single_points]) # Reshaped for DBSCAN
+
+#     db_median = DBSCAN(eps=dbscan_eps, min_samples=2).fit(medians)
+    
+#     # Group by cluster labels
+#     clusters = defaultdict(list)
+#     for idx, label in enumerate(db_median.labels_):
+#         if label != -1:
+#             clusters[label].append(fields[idx])
+
+#     # Connect clustered nodes bidirectionally
+#     # You would intuitively think the similarity score should be 1.0 (100% match), but its not?
+#     for cluster_nodes in clusters.values():
+#         for i in range(len(cluster_nodes)):
+#             for j in range(i + 1, len(cluster_nodes)):
+#                 network.add_relation(cluster_nodes[i], cluster_nodes[j], Relation.CONTENT_SIM, overlap_th)
+#                 network.add_relation(cluster_nodes[j], cluster_nodes[i], Relation.CONTENT_SIM, overlap_th)
 
 def build_content_sim_relation_num_overlap_distr(
-    network: FieldNetwork,
+    network, # FieldNetwork
     id_sig: Iterator[tuple[str, tuple[float, float, float, float]]],
-    config: AurumConfig | None = None,
+    config: AurumConfig | None = None
 ) -> None:
-    """Build ``CONTENT_SIM`` and ``INCLUSION_DEPENDENCY`` edges for numeric columns.
-
-    For each pair of numeric columns, the function checks:
-
-    * **Content similarity**: whether the IQR‑based ranges overlap by ≥ 85 %.
-      Three overlap cases are handled (full containment, left partial, right
-      partial), matching legacy ``compute_overlap``.
-    * **Inclusion dependency**: whether one column's ``[min, max]`` is entirely
-      contained in the other's *and* the core (median ± IQR) overlap ≥ 30 %.
-      Only positive‑valued columns are considered.
-    * **Single‑point clustering**: columns whose IQR domain = 0 are clustered
-      with ``DBSCAN(eps=0.1, min_samples=2)`` on their median value.  Columns
-      in the same cluster get ``CONTENT_SIM`` edges.
-
-    Thresholds are taken from *config* (defaults: ``num_overlap_th=0.85``,
-    ``inclusion_dep_th=0.3``, ``dbscan_eps=0.1``).
-    """
-    # 1. Fetch configurations or use defaults
+    """Build CONTENT_SIM and INCLUSION_DEPENDENCY edges for numeric columns."""
+    
+    max_degree = config.max_degrees if config and hasattr(config, 'max_degrees') else 500
     overlap_th = config.num_overlap_th if config and hasattr(config, 'num_overlap_th') else 0.85
     inc_dep_th = config.inclusion_dep_th if config and hasattr(config, 'inclusion_dep_th') else 0.3
     dbscan_eps = config.dbscan_eps if config and hasattr(config, 'dbscan_eps') else 0.1
 
     def compute_overlap(ref_left: float, ref_right: float, left: float, right: float) -> float:
-        """Calculates overlap ratio relative to the reference domain width."""
         ref_width = ref_right - ref_left
         if ref_width == 0:
             return 0.0
-            
-        # Calculate geometric intersection bounds
         overlap_left = max(ref_left, left)
         overlap_right = min(ref_right, right)
-        
         if overlap_left < overlap_right:
             return (overlap_right - overlap_left) / ref_width
         return 0.0
 
-    # 2. Prepare and sort domain statistics
     entries = []
     for nid, (c_median, c_iqr, c_min, c_max) in id_sig:
         x_left = c_median - c_iqr
@@ -231,65 +380,75 @@ def build_content_sim_relation_num_overlap_distr(
         domain = x_right - x_left
         entries.append((domain, nid, c_min, x_left, x_right, c_max))
         
-    # Sort descending by domain size
     entries.sort(reverse=True, key=lambda x: x[0])
-    
     single_points = []
+    
+    # Trackers for the Hairball Killer
+    degree_tracker = defaultdict(int)
+    pruned_hubs = 0
 
-    # 3. Compare pairs for Content Similarity and Inclusion Dependency
     for ref_domain, ref_nid, ref_min, ref_left, ref_right, ref_max in entries:
         if ref_domain == 0:
-            # Save for DBSCAN clustering later
             single_points.append((ref_nid, ref_left)) 
             continue
 
         for cand_domain, cand_nid, cand_min, cand_left, cand_right, cand_max in entries:
-            if cand_nid == ref_nid:
-                continue
-            if cand_domain == 0:
+            if cand_nid == ref_nid or cand_domain == 0:
                 continue
             
-            # Early termination: entries are sorted descending by domain.
-            # If the candidate domain is so small that even full containment
-            # can't reach the overlap threshold, skip the rest.
-            if cand_domain / ref_domain < overlap_th:
+            # The Hairball Killer Check
+            if degree_tracker[ref_nid] >= max_degree:
+                pruned_hubs += 1
+                break # Stop adding edges for this specific super-hub
+            
+            ratio = cand_domain / ref_domain
+            
+            # FIX: Only break if it drops below the LOWEST threshold (inc_dep_th)
+            if ratio < inc_dep_th:
                 break
             
-            # Content Similarity Check
             actual_overlap = compute_overlap(ref_left, ref_right, cand_left, cand_right)
-            if actual_overlap >= overlap_th:
-                network.add_relation(cand_nid, ref_nid, Relation.CONTENT_SIM, actual_overlap)
 
-            # Inclusion Dependency Check
+            # 1. Content Similarity Check (Requires 85%)
+            if ratio >= overlap_th and actual_overlap >= overlap_th:
+                network.add_relation(cand_nid, ref_nid, Relation.CONTENT_SIM, round(actual_overlap, 4))
+                degree_tracker[ref_nid] += 1
+                degree_tracker[cand_nid] += 1
+
+            # 2. Inclusion Dependency Check (Requires 30% + Min/Max containment)
+            # Notice we check this independently now so it doesn't get skipped!
             if not (math.isinf(ref_min) or math.isinf(ref_max) or math.isinf(cand_min) or math.isinf(cand_max)):
                 if cand_min >= ref_min and cand_max <= ref_max:
-                    if cand_min >= 0: # Only positive numbers as IDs
+                    if cand_min >= 0: # Only positive numbers
                         if actual_overlap >= inc_dep_th:
                             network.add_relation(cand_nid, ref_nid, Relation.INCLUSION_DEPENDENCY, 1.0)
+                            degree_tracker[ref_nid] += 1
+                            degree_tracker[cand_nid] += 1
 
-    # 4. Final clustering for single points (Domain == 0)
-    if not single_points:
-        return
+    # Final clustering for single points (Domain == 0)
+    if single_points:
+        fields = [pt[0] for pt in single_points]
+        medians = np.array([[pt[1]] for pt in single_points])
 
-    fields = [pt[0] for pt in single_points]
-    medians = np.array([[pt[1]] for pt in single_points]) # Reshaped for DBSCAN
+        db_median = DBSCAN(eps=dbscan_eps, min_samples=2).fit(medians)
+        
+        clusters = defaultdict(list)
+        for idx, label in enumerate(db_median.labels_):
+            if label != -1:
+                clusters[label].append(fields[idx])
 
-    db_median = DBSCAN(eps=dbscan_eps, min_samples=2).fit(medians)
-    
-    # Group by cluster labels
-    clusters = defaultdict(list)
-    for idx, label in enumerate(db_median.labels_):
-        if label != -1:
-            clusters[label].append(fields[idx])
+        for cluster_nodes in clusters.values():
+            # Apply hairball killer to DBSCAN clusters too
+            if len(cluster_nodes) > max_degree:
+                pruned_hubs += 1
+                continue 
+                
+            for i in range(len(cluster_nodes)):
+                for j in range(i + 1, len(cluster_nodes)):
+                    network.add_relation(cluster_nodes[i], cluster_nodes[j], Relation.CONTENT_SIM, overlap_th)
+                    network.add_relation(cluster_nodes[j], cluster_nodes[i], Relation.CONTENT_SIM, overlap_th)
 
-    # Connect clustered nodes bidirectionally
-    # You would intuitively think the similarity score should be 1.0 (100% match), but its not?
-    for cluster_nodes in clusters.values():
-        for i in range(len(cluster_nodes)):
-            for j in range(i + 1, len(cluster_nodes)):
-                network.add_relation(cluster_nodes[i], cluster_nodes[j], Relation.CONTENT_SIM, overlap_th)
-                network.add_relation(cluster_nodes[j], cluster_nodes[i], Relation.CONTENT_SIM, overlap_th)
-
+    print(f"Numeric builder complete. Pruned {pruned_hubs} generic numeric super-hubs.")
 
 # ======================================================================
 # 4. Primary‑key / foreign‑key relation

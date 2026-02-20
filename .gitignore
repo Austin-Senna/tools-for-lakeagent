@@ -28,4 +28,8 @@ tmp/
 # models/
 s3_loader/*.json
 s3_loader/*.jsonl
+s3_loader/*.txt
+# s3_loader/verified_s3_tables.txt
+# s3_loader/processed_datasets.log
 aurum_v2/.sandbox
+aurum_v2/verified_s3_tables.txt

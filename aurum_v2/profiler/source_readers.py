@@ -339,9 +339,10 @@ class S3Reader:
 
             try:
                 if self.limit_values:
+                    # THE FIX: Use LIMIT to instantly cut the network stream
                     query = (
                         f"SELECT * FROM read_csv_auto(?)"
-                        f" USING SAMPLE {self.max_values} ROWS (reservoir)"
+                        f" LIMIT {self.max_values}"
                     )
                     df = con.execute(query, [path]).df()
                 else:
