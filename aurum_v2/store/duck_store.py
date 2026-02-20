@@ -104,6 +104,7 @@ class DuckStore:
         self._config = config
         self._db_path = str(db_path)
         self._con: duckdb.DuckDBPyConnection = duckdb.connect(self._db_path)
+        self._fts_ready = False
 
     # ==================================================================
     # Schema management
@@ -124,22 +125,48 @@ class DuckStore:
         logger.info("DuckDB tables ready at %s", self._db_path)
 
     def _rebuild_fts(self) -> None:
-        """(Re)create the FTS index on ``text_index.text``.
-
-        Must be called after bulk inserts — DuckDB FTS indexes are not
-        automatically updated on INSERT.
-        """
+        """(Re)create the FTS indexes on text_index and profile."""
         self._con.execute("INSTALL fts; LOAD fts;")
-        # Drop existing FTS index if present
+        
+        # 1. Content Index (For data values) — English stemming is appropriate here
         with contextlib.suppress(duckdb.CatalogException):
             self._con.execute("PRAGMA drop_fts_index('text_index');")
         self._con.execute(
             "PRAGMA create_fts_index("
-            "  'text_index', 'nid', 'text', 'column_name', 'source_name',"
+            "  'text_index', 'nid', 'text',"
             "  stemmer='english', stopwords='english'"
             ");"
         )
-        logger.info("FTS index rebuilt on text_index")
+
+        # 2. Metadata Index — English stemmer so "experiment" matches
+        #    "experimental".  stopwords='none' so identifiers like
+        #    "Id", "Name", "No" remain findable.
+        with contextlib.suppress(duckdb.CatalogException):
+            self._con.execute("PRAGMA drop_fts_index('profile');")
+        self._con.execute(
+            "PRAGMA create_fts_index("
+            "  'profile', 'nid', 'source_name', 'column_name', 'entities',"
+            "  stemmer='english', stopwords='none'"
+            ");"
+        )
+        self._fts_ready = True
+        logger.info("FTS indexes rebuilt on text_index and profile")
+
+    def _ensure_fts(self) -> None:
+        """Lazily rebuild FTS indexes on first search if not already done."""
+        if self._fts_ready:
+            return
+        # Check if the FTS index already exists (from a prior bulk_insert)
+        tables = self._con.execute(
+            "SELECT table_name FROM information_schema.tables"
+            " WHERE table_name LIKE 'fts_main_profile%'"
+        ).fetchall()
+        if tables:
+            self._con.execute("INSTALL fts; LOAD fts;")
+            self._fts_ready = True
+        else:
+            # Build from scratch (e.g. after --rebuild or fresh connection)
+            self._rebuild_fts()
 
     # ==================================================================
     # Ingestion  (single-writer — call from main thread only)
@@ -301,15 +328,16 @@ class DuckStore:
     def search_keywords(
         self, keywords: str, kw_type: KWType, max_hits: int = 15,
     ) -> Iterator[Hit]:
-        """Relevance-ranked keyword search via DuckDB FTS or ILIKE."""
+        """Relevance-ranked keyword search via DuckDB FTS."""
+        self._ensure_fts()
         if kw_type == KWType.KW_CONTENT:
             yield from self._fts_search(keywords, max_hits)
         elif kw_type == KWType.KW_SCHEMA:
-            yield from self._profile_like_search("column_name", keywords, max_hits)
+            yield from self._profile_fts_search("column_name", keywords, max_hits)
         elif kw_type == KWType.KW_ENTITIES:
-            yield from self._profile_like_search("entities", keywords, max_hits)
+            yield from self._profile_fts_search("entities", keywords, max_hits)
         elif kw_type == KWType.KW_TABLE:
-            yield from self._profile_like_search("source_name", keywords, max_hits)
+            yield from self._profile_fts_search("source_name", keywords, max_hits)
 
     def exact_search_keywords(
         self, keywords: str, kw_type: KWType, max_hits: int = 15,
@@ -352,8 +380,41 @@ class DuckStore:
     def fuzzy_keyword_match(
         self, keywords: str, max_hits: int = 15,
     ) -> Iterator[Hit]:
-        """Fuzzy keyword search on text_index (FTS stemming handles most cases)."""
-        yield from self._fts_search(keywords, max_hits)
+        """
+        True fuzzy matching using Levenshtein edit distance.
+        Allows up to 2 character edits (typos).
+        """
+        try:
+            rows = self._con.execute(
+                """
+                WITH tokens AS (
+                    SELECT nid, unnest(string_split(text, ' ')) AS token
+                    FROM text_index
+                ),
+                scored AS (
+                    -- Calculate the minimum edit distance for any token in the text
+                    SELECT nid, min(levenshtein(token, ?)) AS edits
+                    FROM tokens
+                    GROUP BY nid
+                    HAVING edits <= 2  -- Allow a maximum of 2 typos
+                )
+                SELECT s.nid, p.db_name, p.source_name, p.column_name, s.edits
+                FROM scored s
+                JOIN profile p ON s.nid = p.nid
+                ORDER BY s.edits ASC  -- Ascending because lower edit distance is better
+                LIMIT ?
+                """,
+                [keywords, max_hits],
+            ).fetchall()
+        except duckdb.Error as e:
+            logger.warning("Fuzzy query failed: %s", e)
+            return
+            
+        for nid, db, src, col, score in rows:
+            # We convert the edit distance back to a pseudo-score (e.g., 1.0 for exact, lower for more edits)
+            # so it matches the expected Hit format.
+            pseudo_score = 1.0 / (1.0 + float(score)) 
+            yield Hit(nid=nid, db_name=db, source_name=src, field_name=col, score=pseudo_score)
 
     # ==================================================================
     # Internals
@@ -378,6 +439,57 @@ class DuckStore:
         for nid, db, src, col, score in rows:
             yield Hit(nid=nid, db_name=db, source_name=src,
                       field_name=col, score=float(score))
+
+    def _profile_fts_search(self, field: str, keywords: str, max_hits: int) -> Iterator[Hit]:
+        """FTS search on profile metadata, with ILIKE fallback.
+
+        DuckDB FTS matches whole stemmed tokens — it won't find
+        "experimental" when the user types "experiment".  For identifier
+        fields (column_name, source_name) an ILIKE substring match is a
+        better UX, so we try FTS first then fall back.
+        """
+        hits: list[Hit] = []
+
+        # 1. Try FTS (BM25 ranked)
+        try:
+            rows = self._con.execute(
+                f"SELECT nid, db_name, source_name, column_name,"
+                f"       fts_main_profile.match_bm25(nid, ?, fields := '{field}') AS score"
+                f"  FROM profile"
+                f" WHERE score IS NOT NULL"
+                f" ORDER BY score DESC"
+                f" LIMIT ?",
+                [keywords, max_hits],
+            ).fetchall()
+            for nid, db, src, col, score in rows:
+                hits.append(Hit(nid=nid, db_name=db, source_name=src,
+                                field_name=col, score=float(score)))
+        except duckdb.Error as e:
+            logger.warning("Profile FTS query failed: %s", e)
+
+        # 2. Fill remaining slots with ILIKE substring matches
+        seen = {h.nid for h in hits}
+        remaining = max_hits - len(hits)
+        if remaining > 0:
+            try:
+                rows = self._con.execute(
+                    f"SELECT nid, db_name, source_name, column_name"
+                    f"  FROM profile"
+                    f" WHERE {field} ILIKE ?"
+                    f" LIMIT ?",
+                    [f"%{keywords}%", remaining + len(seen)],
+                ).fetchall()
+                for nid, db, src, col in rows:
+                    if nid not in seen:
+                        hits.append(Hit(nid=nid, db_name=db, source_name=src,
+                                        field_name=col, score=0.5))
+                        seen.add(nid)
+                        if len(hits) >= max_hits:
+                            break
+            except duckdb.Error as e:
+                logger.warning("ILIKE fallback failed: %s", e)
+
+        yield from hits
 
     def _profile_like_search(
         self, field: str, keywords: str, max_hits: int,

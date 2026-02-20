@@ -108,6 +108,15 @@ def build_schema_sim_relation(
         dense_vectors.append(vec)
         lsh.index(vec, nid)
 
+    # 3b. Rarity penalty — penalise ubiquitous column names (e.g. "Id" × 13)
+    #     so they don't all saturate at 1.0.
+    #     rarity(nid) = 1 / log2(1 + count_of_columns_with_same_name)
+    from collections import Counter
+    name_counts = Counter(docs)
+    nid_rarity: dict[str, float] = {}
+    for nid_val, doc in zip(nids, docs):
+        nid_rarity[nid_val] = 1.0 / math.log2(1 + name_counts[doc])
+
     # 4. Query and connect nodes (reuse cached dense vectors)
     for i, nid in enumerate(nids):
         neighbors = lsh.query(dense_vectors[i])
@@ -115,8 +124,10 @@ def build_schema_sim_relation(
         # NearPy returns a list of (data, key, distance)
         for _, r_nid, distance in neighbors:
             if nid != r_nid:
-                # distance is Cosine Distance. We want Similarity (1 - distance)
-                score = 1.0 - distance
+                # Cosine similarity × geometric mean of rarity penalties
+                cosine_sim = 1.0 - distance
+                rarity = math.sqrt(nid_rarity[nid] * nid_rarity[r_nid])
+                score = round(cosine_sim * rarity, 4)
                 network.add_relation(nid, r_nid, Relation.SCHEMA_SIM, score)
 
     return lsh
@@ -156,13 +167,13 @@ def build_content_sim_mh_text(
         lsh.insert(nid, m)
         minhashes[nid] = m
 
-    # 2. Query the index for collisions to draw the edges
+    # 2. Query the index for collisions and compute actual Jaccard similarity
     for nid, m in minhashes.items():
         result = lsh.query(m)
         for r_nid in result:
-            if r_nid != nid:
-                # Add the bidirectional edge to the graph
-                network.add_relation(nid, r_nid, Relation.CONTENT_SIM, 1.0)
+            if r_nid != nid and r_nid in minhashes:
+                score = m.jaccard(minhashes[r_nid])
+                network.add_relation(nid, r_nid, Relation.CONTENT_SIM, score)
 
     return lsh
 

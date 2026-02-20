@@ -52,7 +52,7 @@ class ColumnProfile:
     """
 
     nid: str
-    """CRC32 node ID."""
+    """Node ID (``source_name.column_name``)."""
 
     db_name: str
     source_name: str
@@ -67,8 +67,8 @@ class ColumnProfile:
     entities: str = ""
     """Comma-separated NER entity labels."""
 
-    minhash: list[int] = field(default_factory=list)
-    """MinHash signature array (k=512). Empty for numeric columns."""
+    minhash: list[int] | None = field(default=None)
+    """MinHash signature array (k=512). None for numeric columns."""
 
     # ── Numeric column stats ───────────────────────────────────────────
     min_value: float = 0.0
@@ -185,12 +185,13 @@ def profile_column(
     from aurum_v2.models.hit import compute_field_id
 
     unique_values = compute_cardinality(values)
-    kmin_hash: list[int] = []
+    kmin_hash: list[int] | None = None
     numeric_stats = (0.0, 0.0, 0.0, 0.0, 0.0)
 
     if aurum_type == "T":
         kmin_hash = compute_kmin_hash(values, k=minhash_num_perm)
     else:
+        kmin_hash = None  # None → DuckDB NULL (empty [] would pass IS NOT NULL)
         numeric_stats = compute_numeric_stats(values)
 
     nid = compute_field_id(

@@ -14,6 +14,7 @@ It streams CSVs from an S3 bucket without loading the full file into memory.
 
 from __future__ import annotations
 import os 
+import re
 
 import logging
 from collections.abc import Iterator
@@ -295,12 +296,44 @@ class S3Reader:
 
     @staticmethod
     def _table_name_from_path(path: str) -> str:
-        return Path(path).stem
+        """Derive a human-readable table name from an S3 URI.
+
+        S3 layout: ``s3://bucket/datagov/<dataset-slug>/files/<filename>.txt``
+        Result:    ``<dataset-slug>/<filename>``
+
+        Falls back to just the filename stem if the path doesn't match.
+        """
+        parts = path.replace("s3://", "").split("/")
+        # Find the 'files' segment and use dataset_slug/filename
+        stem = Path(parts[-1]).stem
+        try:
+            files_idx = parts.index("files")
+            if files_idx >= 1:
+                dataset = parts[files_idx - 1]
+                return f"{dataset}/{stem}"
+        except ValueError:
+            pass
+        # Fallback: use last two path segments
+        if len(parts) >= 2:
+            return f"{parts[-2]}/{stem}"
+        return stem
+
+    # Files that are metadata stubs, not real data tables
+    _SKIP_STEMS = frozenset({"cc-zero", "license", "readme", "metadata"})
+
+    # Regex for auto-generated column headers (DuckDB fallback)
+    _AUTO_COL_RE = re.compile(r"^column\d+$")
 
     def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str], str]]:
         con = self._connect()
 
         for path in self.s3_paths:
+            # Skip known junk / license stubs
+            stem = Path(path.split("/")[-1]).stem
+            if stem.lower() in self._SKIP_STEMS:
+                logger.debug("Skipping metadata file %s", path)
+                continue
+
             table_name = self._table_name_from_path(path)
             logger.info("Reading %s", path)
 
@@ -320,12 +353,21 @@ class S3Reader:
                 logger.exception("Failed to read %s", path)
                 continue
 
+            # Skip tiny files (< 2 rows means no real data)
+            if len(df) < 2:
+                logger.debug("Skipping %s — only %d rows", path, len(df))
+                continue
+
             for col_name in df.columns:
+                # Skip auto-generated headers (column0, column1, …)
+                # — means DuckDB couldn't detect a header row.
+                if self._AUTO_COL_RE.match(str(col_name)):
+                    continue
+
                 series = df[col_name]
                 is_numeric = pd.api.types.is_numeric_dtype(series.dtype)
                 aurum_type = "N" if is_numeric else "T"
                 values = series.dropna().astype(str).tolist()
-                
 
                 yield (
                     self.db_name,

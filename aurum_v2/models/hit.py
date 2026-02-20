@@ -2,18 +2,15 @@
 Hit — the atomic column reference used everywhere in Aurum.
 
 A Hit uniquely identifies one column in the data lake by its *nid*
-(CRC32 hash of ``db_name + source_name + field_name``).
+(``source_name.column_name``).
 
 Identity semantics:
-    * ``__hash__``  → ``hash(int(nid))``
+    * ``__hash__``  → ``hash(nid)``
     * ``__eq__``    → compare ``nid`` values
-
-These match the legacy ``api/apiutils.py`` behaviour exactly.
 """
 
 from __future__ import annotations
 
-import binascii
 from collections import namedtuple
 
 __all__ = ["Hit", "compute_field_id"]
@@ -24,14 +21,14 @@ __all__ = ["Hit", "compute_field_id"]
 # ---------------------------------------------------------------------------
 
 def compute_field_id(db_name: str, source_name: str, field_name: str) -> str:
-    """Return the CRC32 hash of *db_name + source_name + field_name* as a string.
+    """Return a human-readable node identifier: ``source_name.field_name``.
 
-    This is the canonical node identifier used by the field‑network graph
-    and by Elasticsearch's profiler index.
+    Previous versions used CRC32 hashes (following the legacy ES store),
+    but that was fragile (32-bit collisions, no separator between
+    components).  String nids are unique by construction and readable
+    in graph visualisations.
     """
-    raw = db_name + source_name + field_name
-    nid = binascii.crc32(raw.encode("utf-8"))
-    return str(nid)
+    return f"{source_name}.{field_name}"
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +44,7 @@ class Hit(_BaseHit):
     Parameters
     ----------
     nid : str
-        CRC32 string identifier (see :func:`compute_field_id`).
+        String identifier ``source_name.column_name`` (see :func:`compute_field_id`).
     db_name : str
         Logical database / data‑source group name.
     source_name : str
