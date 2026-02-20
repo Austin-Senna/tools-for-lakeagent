@@ -1,0 +1,72 @@
+{
+        "name": "search_value",
+        "description": "Find columns across the data lake whose actual data values match the query. Use this to find which tables contain a specific data point (e.g., finding where the city 'Los Angeles' appears in the rows). Returns matching columns, their table names, and relevance scores.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The specific data value to search for within column contents."
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default 10).",
+                    "default": 10
+                },
+                "dedup_tables": {
+                    "type": "boolean",
+                    "description": "If true, collapses results to unique tables, keeping only the best-scoring column per table.",
+                    "default": false
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "search_field",
+        "description": "Find columns or tables whose names (attributes/schema) match the query. Use this when you are looking for tables that have specific column names (e.g., searching for 'population' or 'federalShareObligated'). Returns matching tables and columns sorted by relevance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The attribute (column) name or table name to search for."
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default 10).",
+                    "default": 10
+                },
+                "dedup_tables": {
+                    "type": "boolean",
+                    "description": "If true, collapses results to unique tables, keeping only the best-scoring column per table.",
+                    "default": false
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "neighbor",
+        "description": "Find cross-table relationships (neighbors) for a given table or column. Use this when you need to join tables or find related datasets. 'pkfk' finds primary/foreign key links (best for joining), 'content' finds columns with overlapping data values, and 'schema' finds columns with similar names. Always excludes results from the same input table.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": "The starting table name (e.g., 'dataset_id/file.csv') or exact column network ID (e.g., 'dataset_id/file.csv.col_name')."
+                },
+                "relation": {
+                    "type": "string",
+                    "enum": ["content", "schema", "pkfk"],
+                    "description": "The type of relationship to traverse. Use 'pkfk' for strict joins, 'content' for value overlaps, or 'schema' for name similarity.",
+                    "default": "pkfk"
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return. Leave empty for all."
+                }
+            },
+            "required": ["input"]
+        }
+    }

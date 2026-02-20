@@ -12,6 +12,7 @@ Quick start::
 """
 
 from aurum_v2.discovery.api import API, init_system, init_system_duck
+from aurum_v2.discovery.agent_api import AgentAPI, init_agent
 
-__all__ = ["API", "init_system", "init_system_duck"]
+__all__ = ["API", "init_system", "init_system_duck", "AgentAPI", "init_agent"]
 __version__ = "2.0.0"
