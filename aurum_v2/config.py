@@ -27,6 +27,8 @@ class AurumConfig:
     # ── MinHash LSH ────────────────────────────────────────────────────
     minhash_num_perm: int = 512
     minhash_threshold: float = 0.7
+    
+    # --- Edge Limits ----------------
     max_degrees: int = 100
 
     # ── DBSCAN (single‑point numerical clustering) ─────────────────────
@@ -46,7 +48,7 @@ class AurumConfig:
     spacy_model: str = "en_core_web_sm"
     spacy_size: int = 1000
 
-    # ── Text index limits ──────────────────────────────────────────────
+    # ── Read limits ──────────────────────────────────────────────
     limit_values: bool = False
     max_values: int = 10_000
     """Max values stored per column in the keyword search index."""
