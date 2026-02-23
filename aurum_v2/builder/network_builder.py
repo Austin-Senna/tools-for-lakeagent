@@ -25,6 +25,7 @@ from aurum_v2.models.relation import Relation
 import math
 from collections import defaultdict
 from sklearn.cluster import DBSCAN
+import heapq
 
 if TYPE_CHECKING:
     from aurum_v2.config import AurumConfig
@@ -85,7 +86,8 @@ def build_schema_sim_relation(
     Returns the :class:`_LSHIndex` so it can be serialised alongside the
     network artefacts.
     """
-    
+    max_degree = config.max_degrees if config and hasattr(config, 'max_degrees') else 500
+
     # 1. Safely unpack tuples to guarantee nids and docs are perfectly aligned
     fields_list = list(fields)
     if not fields_list:
@@ -121,6 +123,8 @@ def build_schema_sim_relation(
     for i, nid in enumerate(nids):
         neighbors = lsh.query(dense_vectors[i])
         
+        top_k_edges = []
+
         # NearPy returns a list of (data, key, distance)
         for _, r_nid, distance in neighbors:
             if nid != r_nid:
@@ -128,7 +132,15 @@ def build_schema_sim_relation(
                 cosine_sim = 1.0 - distance
                 rarity = math.sqrt(nid_rarity[nid] * nid_rarity[r_nid])
                 score = round(cosine_sim * rarity, 4)
-                network.add_relation(nid, r_nid, Relation.SCHEMA_SIM, score)
+
+                if len(top_k_edges) < max_degree:
+                    heapq.heappush(top_k_edges, (score, r_nid))
+                elif score > top_k_edges[0][0]:
+                    heapq.heappop(top_k_edges)
+                    heapq.heappush(top_k_edges, (score, r_nid))
+
+        for score, r_nid in top_k_edges:
+            network.add_relation(nid, r_nid, Relation.SCHEMA_SIM, score)
 
     return lsh
 
@@ -221,10 +233,7 @@ def build_content_sim_mh_text(
     # 2. Query the index for collisions and compute actual Jaccard similarity
     for nid, m in minhashes.items():
         neighbors = lsh.query(m)
-
-        if len(neighbors) > max_degree:
-            pruned_hubs += 1
-            continue
+        top_neighbors = []
 
         for r_nid in neighbors:
             if r_nid != nid:
@@ -232,10 +241,20 @@ def build_content_sim_mh_text(
                 r_mh_obj = minhashes[r_nid]
                 score = m.jaccard(r_mh_obj)
 
-                # Final safety check: only add if score actually meets the threshold
                 if score >= threshold:
-                    network.add_relation(nid, r_nid, Relation.CONTENT_SIM, round(score, 4))
-                    edges_added += 1
+                    if len(top_neighbors) < max_degree:
+                        heapq.heappush(top_neighbors, (score, r_nid))
+                    elif score > top_neighbors[0][0]:
+                        heapq.heappop(top_neighbors)
+                        heapq.heappush(top_neighbors, (score, r_nid))
+        
+        if len(neighbors) > max_degree:
+            pruned_hubs += 1
+
+        for score, r_nid in top_neighbors:
+            network.add_relation(nid, r_nid, Relation.CONTENT_SIM, round(score, 4))
+            edges_added += 1
+
     print(f"CONTENT_SIM (Text) complete. Added {edges_added} edges. Pruned {pruned_hubs} massive hubs.")
     return lsh
 
@@ -356,7 +375,9 @@ def build_content_sim_relation_num_overlap_distr(
     id_sig: Iterator[tuple[str, tuple[float, float, float, float]]],
     config: AurumConfig | None = None
 ) -> None:
-    """Build CONTENT_SIM and INCLUSION_DEPENDENCY edges for numeric columns."""
+    """Build CONTENT_SIM and INCLUSION_DEPENDENCY edges for numeric columns.
+        O(N^2), but works more closely to O(N).
+    """
     
     max_degree = config.max_degrees if config and hasattr(config, 'max_degrees') else 500
     overlap_th = config.num_overlap_th if config and hasattr(config, 'num_overlap_th') else 0.85
@@ -388,21 +409,19 @@ def build_content_sim_relation_num_overlap_distr(
     pruned_hubs = 0
 
     for ref_domain, ref_nid, ref_min, ref_left, ref_right, ref_max in entries:
+
         if ref_domain == 0:
             single_points.append((ref_nid, ref_left)) 
             continue
+        
+        top_content_sim = []
+        top_inclusion = []
 
         for cand_domain, cand_nid, cand_min, cand_left, cand_right, cand_max in entries:
             if cand_nid == ref_nid or cand_domain == 0:
                 continue
             
-            # The Hairball Killer Check
-            if degree_tracker[ref_nid] >= max_degree:
-                pruned_hubs += 1
-                break # Stop adding edges for this specific super-hub
-            
             ratio = cand_domain / ref_domain
-            
             # FIX: Only break if it drops below the LOWEST threshold (inc_dep_th)
             if ratio < inc_dep_th:
                 break
@@ -411,9 +430,11 @@ def build_content_sim_relation_num_overlap_distr(
 
             # 1. Content Similarity Check (Requires 85%)
             if ratio >= overlap_th and actual_overlap >= overlap_th:
-                network.add_relation(cand_nid, ref_nid, Relation.CONTENT_SIM, round(actual_overlap, 4))
-                degree_tracker[ref_nid] += 1
-                degree_tracker[cand_nid] += 1
+                if len(top_content_sim) < max_degree:
+                    heapq.heappush(top_content_sim, (actual_overlap, cand_nid))
+                elif actual_overlap > top_content_sim[0][0]:
+                    heapq.heappop(top_content_sim)
+                    heapq.heappush(top_content_sim, (actual_overlap, cand_nid))
 
             # 2. Inclusion Dependency Check (Requires 30% + Min/Max containment)
             # Notice we check this independently now so it doesn't get skipped!
@@ -421,9 +442,21 @@ def build_content_sim_relation_num_overlap_distr(
                 if cand_min >= ref_min and cand_max <= ref_max:
                     if cand_min >= 0: # Only positive numbers
                         if actual_overlap >= inc_dep_th:
-                            network.add_relation(cand_nid, ref_nid, Relation.INCLUSION_DEPENDENCY, 1.0)
-                            degree_tracker[ref_nid] += 1
-                            degree_tracker[cand_nid] += 1
+                            if len(top_inclusion) < max_degree:
+                                heapq.heappush(top_inclusion, (actual_overlap, cand_nid))
+                            elif actual_overlap > top_inclusion[0][0]:
+                                heapq.heappop(top_inclusion)
+                                heapq.heappush(top_inclusion, (actual_overlap, cand_nid))
+        
+        for actual_overlap, cand_nid in top_content_sim:
+            network.add_relation(cand_nid, ref_nid, Relation.CONTENT_SIM, round(actual_overlap, 4))
+            degree_tracker[ref_nid] += 1
+            degree_tracker[cand_nid] += 1
+
+        for actual_overlap, cand_nid in top_inclusion:
+            network.add_relation(cand_nid, ref_nid, Relation.INCLUSION_DEPENDENCY, 1.0)
+            degree_tracker[ref_nid] += 1
+            degree_tracker[cand_nid] += 1
 
     # Final clustering for single points (Domain == 0)
     if single_points:
@@ -435,7 +468,7 @@ def build_content_sim_relation_num_overlap_distr(
         clusters = defaultdict(list)
         for idx, label in enumerate(db_median.labels_):
             if label != -1:
-                clusters[label].append(fields[idx])
+                clusters[label].append((fields[idx], medians[idx][0]))
 
         for cluster_nodes in clusters.values():
             # Apply hairball killer to DBSCAN clusters too
@@ -445,8 +478,26 @@ def build_content_sim_relation_num_overlap_distr(
                 
             for i in range(len(cluster_nodes)):
                 for j in range(i + 1, len(cluster_nodes)):
-                    network.add_relation(cluster_nodes[i], cluster_nodes[j], Relation.CONTENT_SIM, overlap_th)
-                    network.add_relation(cluster_nodes[j], cluster_nodes[i], Relation.CONTENT_SIM, overlap_th)
+                    nid_i, med_i = cluster_nodes[i]
+                    nid_j, med_j = cluster_nodes[j]
+                    
+                    # 1. Calculate the spatial distance between the two single points
+                    dist = abs(med_i - med_j)
+                    
+                    # 2. Map the distance [0, eps] to a score [1.0, overlap_th]
+                    if dbscan_eps == 0 or dist == 0:
+                        actual_score = 1.0
+                    else:
+                        actual_score = 1.0 - ((dist / dbscan_eps) * (1.0 - overlap_th))
+                        
+                    # 3. Clamp the score just to be safe from floating point weirdness
+                    actual_score = round(max(overlap_th, min(1.0, actual_score)), 4)
+
+                    # 4. Add the edge using the computed actual score
+                    network.add_relation(nid_i, nid_j, Relation.CONTENT_SIM, actual_score)
+                    network.add_relation(nid_j, nid_i, Relation.CONTENT_SIM, actual_score)
+                    # network.add_relation(cluster_nodes[i], cluster_nodes[j], Relation.CONTENT_SIM, overlap_th)
+                    # network.add_relation(cluster_nodes[j], cluster_nodes[i], Relation.CONTENT_SIM, overlap_th)
 
     print(f"Numeric builder complete. Pruned {pruned_hubs} generic numeric super-hubs.")
 

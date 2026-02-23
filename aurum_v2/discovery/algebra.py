@@ -136,7 +136,8 @@ class Algebra:
 
         # 3. The BFS Loop
         current_frontier = i_drs
-        
+        visited_nids = set(hit.nid for hit in i_drs)
+
         while max_hops > 0:
             max_hops -= 1
             
@@ -146,12 +147,16 @@ class Algebra:
             # Find neighbors for every node in the current frontier
             for hit in current_frontier:
                 neighbors_drs = self._network.neighbors_id(hit, primitive)
-                next_frontier.absorb(neighbors_drs)
+                
+                # 2. Only absorb neighbors we haven't seen yet!
+                for n_hit in neighbors_drs:
+                    if n_hit.nid not in visited_nids:
+                        visited_nids.add(n_hit.nid)
+                        # Assuming DRS has a way to add single hits, or you can build a list
+                        next_frontier.data.append(n_hit)
             
-            # "Snowball" step: Add everything we just found to the final output
+            # If your DRS class requires provenance/operation updates, do it here
             o_drs.absorb(next_frontier)
-            
-            # Move the frontier forward for the next hop
             current_frontier = next_frontier
             
             # Optimization: If we hit a dead end, stop early
