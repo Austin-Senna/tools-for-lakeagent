@@ -113,11 +113,11 @@ def build_schema_sim_relation(
     # 3b. Rarity penalty — penalise ubiquitous column names (e.g. "Id" × 13)
     #     so they don't all saturate at 1.0.
     #     rarity(nid) = 1 / log2(1 + count_of_columns_with_same_name)
-    from collections import Counter
-    name_counts = Counter(docs)
-    nid_rarity: dict[str, float] = {}
-    for nid_val, doc in zip(nids, docs):
-        nid_rarity[nid_val] = 1.0 / math.log2(1 + name_counts[doc])
+    # from collections import Counter
+    # name_counts = Counter(docs)
+    # nid_rarity: dict[str, float] = {}
+    # for nid_val, doc in zip(nids, docs):
+        # nid_rarity[nid_val] = 1.0 / math.log2(1 + name_counts[doc])
 
     # 4. Query and connect nodes (reuse cached dense vectors)
     for i, nid in enumerate(nids):
@@ -129,15 +129,15 @@ def build_schema_sim_relation(
         for _, r_nid, distance in neighbors:
             if nid != r_nid:
                 # Cosine similarity × geometric mean of rarity penalties
-                cosine_sim = 1.0 - distance
-                rarity = math.sqrt(nid_rarity[nid] * nid_rarity[r_nid])
-                score = round(cosine_sim * rarity, 4)
-
+                # cosine_sim = 1.0 - distance
+                # rarity = math.sqrt(nid_rarity[nid] * nid_rarity[r_nid])
+                # score = round(cosine_sim * rarity, 4)
+                score = 1.0
                 if len(top_k_edges) < max_degree:
                     heapq.heappush(top_k_edges, (score, r_nid))
-                elif score > top_k_edges[0][0]:
-                    heapq.heappop(top_k_edges)
-                    heapq.heappush(top_k_edges, (score, r_nid))
+                # elif score > top_k_edges[0][0]:
+                #     heapq.heappop(top_k_edges)
+                #     heapq.heappush(top_k_edges, (score, r_nid))
 
         for score, r_nid in top_k_edges:
             network.add_relation(nid, r_nid, Relation.SCHEMA_SIM, score)
