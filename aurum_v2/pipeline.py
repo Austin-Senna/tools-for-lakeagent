@@ -47,26 +47,26 @@ logging.basicConfig(
 logger = logging.getLogger("pipeline")
 
 
-# ─────────────────────────────────────────────────────────────────────
-# S3 URI resolution (delegates to s3_list.py)
-# ─────────────────────────────────────────────────────────────────────
+# # ─────────────────────────────────────────────────────────────────────
+# # S3 URI resolution (delegates to s3_list.py)
+# # ─────────────────────────────────────────────────────────────────────
 
-def resolve_uris_from_query(query: str, limit: int = 5) -> list[str]:
-    """Use s3_list.py's search_keyword + get_s3_uris_for_tables."""
-    from aurum_v2.s3_list import search_keyword, get_s3_uris_for_tables
+# def resolve_uris_from_query(query: str, limit: int = 5) -> list[str]:
+#     """Use s3_list.py's search_keyword + get_s3_uris_for_tables."""
+#     from aurum_v2.s3_list import search_keyword, get_s3_uris_for_tables
 
-    logger.info("Searching data.gov for '%s' (limit=%d datasets)...", query, limit)
-    results = search_keyword([query], limit=limit)
-    dataset_ids = [r["dataset_id"] for r in results.get("results", [])]
-    if not dataset_ids:
-        logger.warning("No datasets found for '%s'", query)
-        return []
+#     logger.info("Searching data.gov for '%s' (limit=%d datasets)...", query, limit)
+#     results = search_keyword([query], limit=limit)
+#     dataset_ids = [r["dataset_id"] for r in results.get("results", [])]
+#     if not dataset_ids:
+#         logger.warning("No datasets found for '%s'", query)
+#         return []
 
-    logger.info("Found %d datasets: %s", len(dataset_ids), dataset_ids[:5])
-    logger.info("Peeking inside datasets to find actual tables...")
-    uris = get_s3_uris_for_tables(dataset_ids)
-    logger.info("Resolved %d S3 table URIs", len(uris))
-    return uris
+#     logger.info("Found %d datasets: %s", len(dataset_ids), dataset_ids[:5])
+#     logger.info("Peeking inside datasets to find actual tables...")
+#     uris = get_s3_uris_for_tables(dataset_ids)
+#     logger.info("Resolved %d S3 table URIs", len(uris))
+#     return uris
 
 
 def load_uris_from_file(path: str, n_files: int | None = None) -> list[str]:
@@ -144,7 +144,7 @@ def main():
         description="Aurum v2 pipeline: profile S3 tables → build graph",
     )
     src = parser.add_mutually_exclusive_group()
-    src.add_argument("--query", type=str, help="Search data.gov via s3_list.py")
+    # src.add_argument("--query", type=str, help="Search data.gov via s3_list.py")
     src.add_argument("--uri-file", type=str, help="Text file of s3:// URIs (one per line)")
     src.add_argument("--uris", nargs="+", help="Explicit s3:// URIs")
     src.add_argument("--rebuild", action="store_true", help="Rebuild graph from existing DuckDB (skip profiling)")
@@ -170,15 +170,15 @@ def main():
     if args.rebuild:
         logger.info("Rebuilding graph from existing DuckDB at %s", db_path)
         
-    elif args.query:
-        uris = resolve_uris_from_query(args.query, limit=args.limit)
-        if args.n_files:
-            uris = uris[:args.n_files]
+    # elif args.query:
+    #     uris = resolve_uris_from_query(args.query, limit=args.limit)
+    #     if args.n_files:
+    #         uris = uris[:args.n_files]
             
-        if not uris:
-            logger.error("No tables found. Exiting.")
-            sys.exit(1)
-        stage_profile(uris, config, duck, sample_rows=args.sample_rows, max_workers=args.workers, region=args.region)
+    #     if not uris:
+    #         logger.error("No tables found. Exiting.")
+    #         sys.exit(1)
+    #     stage_profile(uris, config, duck, sample_rows=args.sample_rows, max_workers=args.workers, region=args.region)
         
     elif args.uri_file:
         uris = load_uris_from_file(args.uri_file, n_files=args.n_files)

@@ -29,7 +29,7 @@ class AurumConfig:
     minhash_threshold: float = 0.7
     
     # --- Edge Limits ----------------
-    max_degrees: int = 100
+    max_degrees: int = 200
 
     # ── DBSCAN (single‑point numerical clustering) ─────────────────────
     dbscan_eps: float = 0.1
@@ -50,7 +50,7 @@ class AurumConfig:
 
     # ── Read limits ──────────────────────────────────────────────
     limit_values: bool = False
-    max_values: int = 10_000
+    max_values: int = 20000
     """Max values stored per column in the keyword search index."""
 
     # ── DuckDB ─────────────────────────────────────────────────────────

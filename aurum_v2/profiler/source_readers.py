@@ -324,9 +324,6 @@ class S3Reader:
     # Regex for auto-generated column headers (DuckDB fallback)
     _AUTO_COL_RE = re.compile(r"^column\d+$")
 
-    # Max words kept when treating a file as raw text
-    _MAX_TEXT_WORDS = 10_000
-
     def _s3_read_raw(self, path: str) -> str:
         """Download the full content of an S3 object as a UTF-8 string."""
         # Parse s3://bucket/key
@@ -353,12 +350,15 @@ class S3Reader:
         * GeoJSON  – ``{"type": "FeatureCollection", "features": [...]}``
         * Plain array – ``[{...}, ...]``
 
+        Respects ``self.limit_values`` / ``self.max_values``.
         Returns None when the content is not valid / recognisable JSON.
         """
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
             return None
+
+        limit: int | None = self.max_values if self.limit_values else None
 
         # --- Socrata ---
         if (
@@ -369,6 +369,8 @@ class S3Reader:
         ):
             all_columns = [col["name"] for col in data["meta"]["view"]["columns"]]
             rows = data.get("data", [])
+            if limit is not None:
+                rows = rows[:limit]
             df = pd.DataFrame(rows, columns=all_columns)
             hidden = {
                 col["name"]
@@ -379,11 +381,16 @@ class S3Reader:
 
         # --- GeoJSON FeatureCollection ---
         if isinstance(data, dict) and data.get("type") == "FeatureCollection":
-            records = [f.get("properties", {}) for f in data.get("features", [])]
+            features = data.get("features", [])
+            if limit is not None:
+                features = features[:limit]
+            records = [f.get("properties", {}) for f in features]
             return pd.DataFrame(records)
 
         # --- Plain JSON array — let DuckDB parse it ---
         if isinstance(data, list):
+            if limit is not None:
+                data = data[:limit]
             try:
                 json_str = json.dumps(data)
                 return con.execute("SELECT * FROM read_json_auto(?)", [json_str]).df()
@@ -392,16 +399,45 @@ class S3Reader:
 
         return None
 
-    def _df_from_text(self, content: str, table_name: str) -> pd.DataFrame:
-        """Treat raw text as a single-column table.
+    # Common English stop words to exclude from unstructured text
+    _STOP_WORDS = frozenset({
+        "about", "above", "after", "again", "also", "another", "because",
+        "been", "before", "being", "between", "both", "cannot", "come",
+        "could", "does", "doing", "done", "down", "each", "even", "ever",
+        "every", "from", "further", "have", "having", "here",
+        "hers", "herself", "himself", "his", "into", "itself", "just",
+        "like", "make", "many", "more", "most", "much", "myself", "need",
+        "never", "next", "none", "nothing", "once", "only", "other",
+        "otherwise", "ourselves", "over", "said", "same", "seem", "should",
+        "since", "some", "such", "than", "that", "their", "them", "then",
+        "there", "these", "they", "this", "those", "through", "together",
+        "under", "until", "upon", "very", "want", "were", "what", "when",
+        "where", "which", "while", "whom", "will", "with", "would", "your",
+        "yourself", "yourselves",
+    })
 
-        The column name is derived from ``table_name`` (the filename stem).
-        Content is word-capped at :attr:`_MAX_TEXT_WORDS`.
+    def _df_from_text(self, content: str, table_name: str) -> pd.DataFrame:
+        """Treat raw text as a single-column table of meaningful tokens.
+
+        Extracts unique, non-trivial words (4+ chars, no stop words) from the
+        content and yields each as its own row so the profiler sees real values
+        rather than one giant string blob.
         """
-        words = content.split()
-        truncated = " ".join(words[: self._MAX_TEXT_WORDS])
-        col_name = table_name.split("/")[-1]  # use just the filename part
-        return pd.DataFrame({col_name: [truncated]})
+        col_name = table_name.split("/")[-1]
+
+        # Extract words of 4+ chars, deduplicate, filter stop words
+        raw_tokens = re.findall(r'\b[a-zA-Z]{4,}\b', content)
+        seen: set[str] = set()
+        tokens: list[str] = []
+        for tok in raw_tokens:
+            lower = tok.lower()
+            if lower not in self._STOP_WORDS and lower not in seen:
+                seen.add(lower)
+                tokens.append(tok)
+                if len(tokens) >= self.max_values:
+                    break
+
+        return pd.DataFrame({col_name: tokens})
 
     def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str], str]]:
         con = self._connect()
@@ -411,53 +447,36 @@ class S3Reader:
             table_name = self._table_name_from_path(path)
             logger.info("Reading %s", path)
 
-            ext = Path(path.split("/")[-1]).suffix.lower()
-
-            # ----------------------------------------------------------------
-            # JSON files — fetch via boto3, parse in Python/DuckDB
-            # ----------------------------------------------------------------
-            if ext in (".json", ".geojson"):
-                try:
-                    content = self._s3_read_raw(path)
-                    df = self._df_from_json(content, con)
-                    if df is None:
-                        logger.warning("Could not parse JSON from %s", path)
-                        continue
-                except Exception:
-                    logger.exception("Failed to read JSON %s", path)
-                    continue
-
             # ----------------------------------------------------------------
             # Plain-text files — one text column, word-capped
             # ----------------------------------------------------------------
-            elif ext in (".txt", ".text", ".md"):
-                try:
-                    content = self._s3_read_raw(path)
-                    stripped = content.strip()
-                    # If it actually looks like JSON, try that first
-                    if stripped.startswith(("{", "[")):
-                        df = self._df_from_json(stripped, con)
-                        if df is None:
-                            df = self._df_from_text(content, table_name)
-                    else:
-                        df = self._df_from_text(content, table_name)
-                except Exception:
-                    logger.exception("Failed to read text file %s", path)
-                    continue
 
-            # ----------------------------------------------------------------
-            # CSV / TSV and everything else — DuckDB read_csv_auto
-            # ----------------------------------------------------------------
-            else:
-                try:
-                    if self.limit_values:
-                        query = "SELECT * FROM read_csv_auto(?) LIMIT ?"
-                        df = con.execute(query, [path, self.max_values]).df()
+            try:
+                content = self._s3_read_raw(path)
+                stripped = content.strip()
+                # If it actually looks like JSON, try that first
+                if stripped.startswith(("{", "[")):
+                    df = self._df_from_json(stripped, con)
+                    if df is None:
+                        df = self._df_from_text(content, table_name)
+                else:
+                    first_line = content.split('\n')[0]
+                    if any(delim in first_line for delim in [',', '\t', '|', ';']):
+                        try:
+                            if self.limit_values:
+                                query = "SELECT * FROM read_csv_auto(?) LIMIT ?"
+                                df = con.execute(query, [path, self.max_values]).df()
+                            else:
+                                df = con.execute("SELECT * FROM read_csv_auto(?)", [path]).df()
+                        except Exception:
+                            logger.exception("Failed to read %s", path)
+                            continue
                     else:
-                        df = con.execute("SELECT * FROM read_csv_auto(?)", [path]).df()
-                except Exception:
-                    logger.exception("Failed to read %s", path)
-                    continue
+                        # 3. Fallback: Treat as unstructured text
+                        df = self._df_from_text(content, table_name)
+            except Exception:
+                logger.exception("Failed to read text file %s", path)
+                continue
 
             # Skip tiny files (< 2 rows means no real data)
             if len(df) < 2:
@@ -465,8 +484,17 @@ class S3Reader:
                 continue
 
             for col_name in df.columns:
+                col_str = str(col_name)
                 # Skip auto-generated headers (column0, column1, …)
                 if self._AUTO_COL_RE.match(str(col_name)):
+                    continue
+                
+                if len(col_str) > 255:
+                    logger.debug(
+                        "Skipping absurdly long column name (%d chars) in %s. "
+                        "Likely a missing header row.", 
+                        len(col_str), path
+                    )
                     continue
 
                 series = df[col_name]
