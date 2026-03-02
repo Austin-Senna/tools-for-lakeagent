@@ -23,31 +23,73 @@ def _get_s3_client():
         config=boto_config
     )
 
+
+# Regex patterns for metadata filenames detected from verified_datasources_for_tests.txt
+_SOCRATA_ID_RE = re.compile(r'^[a-z0-9]{4}-[a-z0-9]{4}$')          # e.g. tsqz-67gi
+_PURE_NUMBER_RE = re.compile(r'^\d+(-\d+)?$')                        # e.g. 0, 1, 4, 1-0, 15901
+_RANDOM_SUFFIX_RE = re.compile(r'^.+-[A-Za-z0-9]{6}$')              # e.g. data-ghDEVP, SG610-...-kDO3fv
+
+# Exact metadata filenames (lowercased for comparison)
+_METADATA_EXACT = {
+    'data', 'rows', 'columns', 'metadata',
+    'gmi', 'open-licenses', 'legalcode', 'government-works',
+    'index', 'odc-odbl', 'wmsserver', 'resolve', 'request',
+    'edit', 'search', 'contact', 'policyinformation', 'gmxcodelists',
+    'bios', 'hires', 'cwhr', 'license', 'readme'
+    # legacy entries kept from original ignore_list
+    'signed-metadata', 'headers', 'dcat-us', 'catalog',
+    'readme', 'iso', 'cc-zero', 'cc-by'
+}
+
+def _is_metadata_filename(filename: str) -> bool:
+    """Returns True if the filename (without extension) looks like metadata, not real data."""
+    stem = filename.rsplit('.', 1)[0].lower()
+    if stem in _METADATA_EXACT:
+        return True
+    if _SOCRATA_ID_RE.match(stem):
+        return True
+    if _PURE_NUMBER_RE.match(stem):
+        return True
+    if _RANDOM_SUFFIX_RE.match(stem):
+        return True
+    return False
+
 def list_files(s3, dataset_id: str, limit: int = 100) -> List[Dict[str, Any]]:
     all_files = []
-    folder = "datagov" 
-    prefix = f"{folder}/{dataset_id}/"
-    
-    response = s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix, MaxKeys=limit)
 
-    if 'Contents' in response:
-        for obj in response['Contents']:
-            if not obj['Key'].endswith('/'):
+    # Iterate over both folders dynamically
+    for folder in ["wikipedia", "datagov"]:
+        prefix = f"{folder}/{dataset_id}/"
+        paginator = s3.get_paginator('list_objects_v2')
+
+        for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix):
+            if 'Contents' not in page:
+                continue
+
+            for obj in page['Contents']:
+                key = obj['Key']
+                # Get the filename or relative path
+                relative_path = key.split(prefix, 1)[-1]
+
+                if not relative_path or key.endswith('/'):
+                    continue
+
+                # Skip metadata files identified by name alone
+                fname = relative_path.split('/')[-1]
+                if _is_metadata_filename(fname):
+                    continue
+                    
                 all_files.append({
-                    'path': obj['Key'].split(prefix, 1)[-1],
+                    'path': relative_path,
                     'dataset_id': dataset_id,
                     'folder': folder,
-                    'full_key': obj['Key']
+                    'full_key': key
                 })
     return all_files
 
+
 def _is_table_by_peeking(s3, file_path: str) -> bool:
     """Downloads the first 2KB of a file from S3 to verify structural integrity."""
-    lower_path = file_path.lower()
-    ignore_list = ['metadata.json', 'signed-metadata', 'catalog.', 'cc-by', 'iso.xml', 'iso.txt', 'readme']
-    if any(skip in lower_path for skip in ignore_list):
-        return False
-    
     try:
         response = s3.get_object(Bucket=BUCKET, Key=file_path, Range='bytes=0-2048')
         content = response['Body'].read().decode('utf-8', errors='ignore')
@@ -81,7 +123,7 @@ def _is_table_by_peeking(s3, file_path: str) -> bool:
     except Exception:
         return False
 
-def process_single_dataset(s3, dataset_id: str) -> tuple:
+def process_single_dataset(s3, dataset_id: str, table_only: bool) -> tuple:
     """Worker function for a single thread. Returns (dataset_id, list_of_uris)."""
     files_data = list_files(s3, dataset_id)
     s3_uris = []
@@ -92,17 +134,13 @@ def process_single_dataset(s3, dataset_id: str) -> tuple:
             continue
             
         uri = f"s3://{BUCKET}/{f['full_key']}"
-            
-        if lower_path.endswith('.zip'):
-            s3_uris.append(uri)
-            continue
-            
-        if _is_table_by_peeking(s3, f['full_key']):
+
+        if not table_only or _is_table_by_peeking(s3, f['full_key']):
             s3_uris.append(uri)
             
     return dataset_id, s3_uris
 
-def extract_and_verify_tables(input_txt, output_txt, log_txt="processed_datasets.log"):
+def extract_and_verify(input_txt, output_txt, table_only, log_txt="processed_datasets.log"):
     if not Path(input_txt).exists():
         print(f"Error: Could not find {input_txt}")
         return
@@ -139,7 +177,7 @@ def extract_and_verify_tables(input_txt, output_txt, log_txt="processed_datasets
             
             # Submit all tasks to the queue
             future_to_dataset = {
-                executor.submit(process_single_dataset, s3_client, ds): ds 
+                executor.submit(process_single_dataset, s3_client, ds, table_only): ds 
                 for ds in pending_datasets
             }
             
@@ -172,9 +210,10 @@ def extract_and_verify_tables(input_txt, output_txt, log_txt="processed_datasets
 
     print("\nDone! 🎉")
 
+
 if __name__ == "__main__":
     load_dotenv()
     input_txt = sys.argv[1] if len(sys.argv) > 1 else "all_datasets_complete.txt"
     output_txt = sys.argv[2] if len(sys.argv) > 2 else "verified_s3_tables.txt"
-    
-    extract_and_verify_tables(input_txt, output_txt)
+    table_only = bool(int(sys.argv[3])) if len(sys.argv) > 3 else True
+    extract_and_verify(input_txt, output_txt, table_only=table_only)
