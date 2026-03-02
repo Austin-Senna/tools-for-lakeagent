@@ -13,8 +13,9 @@ It streams CSVs from an S3 bucket without loading the full file into memory.
 """
 
 from __future__ import annotations
-import os 
+import os
 import re
+import json
 
 import logging
 from collections.abc import Iterator
@@ -22,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+import boto3
 import duckdb
 import pandas as pd
 
@@ -318,41 +320,144 @@ class S3Reader:
             return f"{parts[-2]}/{stem}"
         return stem
 
-    # Files that are metadata stubs, not real data tables
-    _SKIP_STEMS = frozenset({"cc-zero", "license", "readme", "metadata"})
 
     # Regex for auto-generated column headers (DuckDB fallback)
     _AUTO_COL_RE = re.compile(r"^column\d+$")
+
+    # Max words kept when treating a file as raw text
+    _MAX_TEXT_WORDS = 10_000
+
+    def _s3_read_raw(self, path: str) -> str:
+        """Download the full content of an S3 object as a UTF-8 string."""
+        # Parse s3://bucket/key
+        without_scheme = path[len("s3://"):]
+        bucket, _, key = without_scheme.partition("/")
+        access_key = os.getenv("AWS_ACCESS_KEY_ID")
+        secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+        session_token = os.getenv("AWS_SESSION_TOKEN")
+        s3 = boto3.client(
+            "s3",
+            region_name=self.region,
+            aws_access_key_id=access_key or None,
+            aws_secret_access_key=secret_key or None,
+            aws_session_token=session_token or None,
+        )
+        response = s3.get_object(Bucket=bucket, Key=key)
+        return response["Body"].read().decode("utf-8", errors="replace")
+
+    def _df_from_json(self, content: str, con: duckdb.DuckDBPyConnection) -> pd.DataFrame | None:
+        """Parse JSON content into a DataFrame using DuckDB where possible.
+
+        Handles three formats:
+        * Socrata  – ``{"meta": {"view": {...}}, "data": [...]}``
+        * GeoJSON  – ``{"type": "FeatureCollection", "features": [...]}``
+        * Plain array – ``[{...}, ...]``
+
+        Returns None when the content is not valid / recognisable JSON.
+        """
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+
+        # --- Socrata ---
+        if (
+            isinstance(data, dict)
+            and "meta" in data
+            and isinstance(data["meta"], dict)
+            and "view" in data["meta"]
+        ):
+            all_columns = [col["name"] for col in data["meta"]["view"]["columns"]]
+            rows = data.get("data", [])
+            df = pd.DataFrame(rows, columns=all_columns)
+            hidden = {
+                col["name"]
+                for col in data["meta"]["view"]["columns"]
+                if "hidden" in col.get("flags", [])
+            }
+            return df.drop(columns=list(hidden), errors="ignore")
+
+        # --- GeoJSON FeatureCollection ---
+        if isinstance(data, dict) and data.get("type") == "FeatureCollection":
+            records = [f.get("properties", {}) for f in data.get("features", [])]
+            return pd.DataFrame(records)
+
+        # --- Plain JSON array — let DuckDB parse it ---
+        if isinstance(data, list):
+            try:
+                json_str = json.dumps(data)
+                return con.execute("SELECT * FROM read_json_auto(?)", [json_str]).df()
+            except Exception:
+                return pd.DataFrame(data)
+
+        return None
+
+    def _df_from_text(self, content: str, table_name: str) -> pd.DataFrame:
+        """Treat raw text as a single-column table.
+
+        The column name is derived from ``table_name`` (the filename stem).
+        Content is word-capped at :attr:`_MAX_TEXT_WORDS`.
+        """
+        words = content.split()
+        truncated = " ".join(words[: self._MAX_TEXT_WORDS])
+        col_name = table_name.split("/")[-1]  # use just the filename part
+        return pd.DataFrame({col_name: [truncated]})
 
     def read_columns(self) -> Iterator[tuple[str, str, str, str, list[str], str]]:
         con = self._connect()
 
         for path in self.s3_paths:
-            # Skip known junk / license stubs
-            stem = Path(path.split("/")[-1]).stem
-            if stem.lower() in self._SKIP_STEMS:
-                logger.debug("Skipping metadata file %s", path)
-                continue
 
             table_name = self._table_name_from_path(path)
             logger.info("Reading %s", path)
 
-            try:
-                if self.limit_values:
-                    # THE FIX: Use LIMIT to instantly cut the network stream
-                    query = (
-                        f"SELECT * FROM read_csv_auto(?)"
-                        f" LIMIT {self.max_values}"
-                    )
-                    df = con.execute(query, [path]).df()
-                else:
-                    query = (
-                        "SELECT * FROM read_csv_auto(?)"
-                    )
-                    df = con.execute(query, [path]).df()
-            except Exception:
-                logger.exception("Failed to read %s", path)
-                continue
+            ext = Path(path.split("/")[-1]).suffix.lower()
+
+            # ----------------------------------------------------------------
+            # JSON files — fetch via boto3, parse in Python/DuckDB
+            # ----------------------------------------------------------------
+            if ext in (".json", ".geojson"):
+                try:
+                    content = self._s3_read_raw(path)
+                    df = self._df_from_json(content, con)
+                    if df is None:
+                        logger.warning("Could not parse JSON from %s", path)
+                        continue
+                except Exception:
+                    logger.exception("Failed to read JSON %s", path)
+                    continue
+
+            # ----------------------------------------------------------------
+            # Plain-text files — one text column, word-capped
+            # ----------------------------------------------------------------
+            elif ext in (".txt", ".text", ".md"):
+                try:
+                    content = self._s3_read_raw(path)
+                    stripped = content.strip()
+                    # If it actually looks like JSON, try that first
+                    if stripped.startswith(("{", "[")):
+                        df = self._df_from_json(stripped, con)
+                        if df is None:
+                            df = self._df_from_text(content, table_name)
+                    else:
+                        df = self._df_from_text(content, table_name)
+                except Exception:
+                    logger.exception("Failed to read text file %s", path)
+                    continue
+
+            # ----------------------------------------------------------------
+            # CSV / TSV and everything else — DuckDB read_csv_auto
+            # ----------------------------------------------------------------
+            else:
+                try:
+                    if self.limit_values:
+                        query = "SELECT * FROM read_csv_auto(?) LIMIT ?"
+                        df = con.execute(query, [path, self.max_values]).df()
+                    else:
+                        df = con.execute("SELECT * FROM read_csv_auto(?)", [path]).df()
+                except Exception:
+                    logger.exception("Failed to read %s", path)
+                    continue
 
             # Skip tiny files (< 2 rows means no real data)
             if len(df) < 2:
@@ -361,7 +466,6 @@ class S3Reader:
 
             for col_name in df.columns:
                 # Skip auto-generated headers (column0, column1, …)
-                # — means DuckDB couldn't detect a header row.
                 if self._AUTO_COL_RE.match(str(col_name)):
                     continue
 
