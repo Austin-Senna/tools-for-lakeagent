@@ -31,14 +31,13 @@ _RANDOM_SUFFIX_RE = re.compile(r'^.+-[A-Za-z0-9]{6}$')              # e.g. data-
 
 # Exact metadata filenames (lowercased for comparison)
 _METADATA_EXACT = {
-    'data', 'rows', 'columns', 'metadata',
+    'metadata',
     'gmi', 'open-licenses', 'legalcode', 'government-works',
     'index', 'odc-odbl', 'wmsserver', 'resolve', 'request',
     'edit', 'search', 'contact', 'policyinformation', 'gmxcodelists',
-    'bios', 'hires', 'cwhr', 'license', 'readme'
+    'bios', 'hires', 'cwhr', 'license', 'readme',
     # legacy entries kept from original ignore_list
-    'signed-metadata', 'headers', 'dcat-us', 'catalog',
-    'readme', 'iso', 'cc-zero', 'cc-by'
+    'signed-metadata', 'headers', 'dcat-us', 'catalog', 'iso', 'cc-zero', 'cc-by'
 }
 
 def _is_metadata_filename(filename: str) -> bool:
@@ -215,5 +214,5 @@ if __name__ == "__main__":
     load_dotenv()
     input_txt = sys.argv[1] if len(sys.argv) > 1 else "all_datasets_complete.txt"
     output_txt = sys.argv[2] if len(sys.argv) > 2 else "verified_s3_tables.txt"
-    table_only = bool(int(sys.argv[3])) if len(sys.argv) > 3 else True
+    table_only = bool(int(sys.argv[3])) if len(sys.argv) > 3 else False
     extract_and_verify(input_txt, output_txt, table_only=table_only)

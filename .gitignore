@@ -36,3 +36,4 @@ aurum_v2/verified_s3_tables.txt
 aurum_v2/graph.html
 aurum_v2/aurum.db
 aurum_v2/lib
+*.pem

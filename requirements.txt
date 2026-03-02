@@ -1,0 +1,20 @@
+# Aurum v2 — pipeline build requirements
+# Usage: pip install -r requirements.txt
+# Covers: python -m aurum_v2.pipeline --uri-file ... --n-files ...
+
+# S3 access + CSV/JSON reading
+boto3>=1.34
+duckdb>=1.0
+pandas>=2.2
+
+# Profiler
+numpy>=1.26
+datasketch>=1.6       # MinHash + HyperLogLog
+
+# Graph builder
+scikit-learn>=1.5     # TfidfVectorizer, DBSCAN
+nearpy>=0.1.3         # NearPy LSH for schema similarity
+networkx>=3.3         # FieldNetwork graph
+
+# Pipeline entry point
+python-dotenv>=1.0
