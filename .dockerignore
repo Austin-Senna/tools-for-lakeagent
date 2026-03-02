@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data & model artifacts (mount as volumes instead)
+*.db
+model/
+*.pickle
+*.pkl
+
+# Credentials
+*.pem
+.env
+.env.*
+
+# Legacy code
+aurum_legacy/
+
+# Dev files
+*.html
+s3_loader/

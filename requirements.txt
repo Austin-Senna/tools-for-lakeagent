@@ -14,7 +14,11 @@ datasketch>=1.6       # MinHash + HyperLogLog
 # Graph builder
 scikit-learn>=1.5     # TfidfVectorizer, DBSCAN
 nearpy>=0.1.3         # NearPy LSH for schema similarity
-networkx>=3.3         # FieldNetwork graph
+networkx>=3.2         # FieldNetwork graph
+
+# Store / UI
+elasticsearch>=8.0    # ElasticStore (optional but imported)
+rich>=13.0            # Progress output
 
 # Pipeline entry point
 python-dotenv>=1.0
