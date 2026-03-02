@@ -52,6 +52,8 @@ class AurumConfig:
     limit_values: bool = False
     max_values: int = 20000
     """Max values stored per column in the keyword search index."""
+    max_file_size_gb: float = 10.0
+    """S3 files larger than this (in GB) are skipped entirely."""
 
     # ── DuckDB ─────────────────────────────────────────────────────────
     duckdb_path: str = "aurum.db"

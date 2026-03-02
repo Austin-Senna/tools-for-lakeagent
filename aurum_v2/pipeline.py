@@ -108,6 +108,7 @@ def stage_profile(
         region=region,
         limit_values=True, # Force sampling so we don't blow up memory
         max_values=sample_rows,
+        max_file_size_gb=config.max_file_size_gb,
     )
 
     profiler = Profiler(config)
@@ -186,7 +187,7 @@ def main():
             logger.error("No URIs in file. Exiting.")
             sys.exit(1)
         stage_profile(uris, config, duck, sample_rows=args.sample_rows, max_workers=args.workers, region=args.region)
-        
+
     elif args.uris:
         uris = args.uris[:args.n_files] if args.n_files else args.uris
         stage_profile(uris, config, duck, sample_rows=args.sample_rows, max_workers=args.workers, region=args.region)
