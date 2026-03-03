@@ -57,6 +57,7 @@ class _LSHIndex:
             lshashes=[self._rbp],
             distance=CosineDistance(),
         )
+        self.vectorizer = None  # set after build; needed for query_string()
 
     def index(self, vector: np.ndarray, key: str) -> None:
         self._engine.store_vector(vector, key)
@@ -64,6 +65,17 @@ class _LSHIndex:
     def query(self, vector: np.ndarray) -> list:
         """Return list of ``(data, key, distance)`` triples."""
         return self._engine.neighbours(vector)
+
+    def query_string(self, text: str) -> list:
+        """Transform *text* with the fitted TF-IDF vectorizer and query the index.
+
+        Returns list of ``(data, key, distance)`` triples, same as :meth:`query`.
+        Raises ``RuntimeError`` if the vectorizer was not stored at build time.
+        """
+        if self.vectorizer is None:
+            raise RuntimeError("_LSHIndex has no vectorizer; rebuild the index.")
+        vec = self.vectorizer.transform([text]).toarray()[0]
+        return self._engine.neighbours(vec)
 
 
 # ======================================================================
@@ -109,6 +121,7 @@ def build_schema_sim_relation(
     log.debug("  schema_sim: TF-IDF matrix shape=%s (vocab size=%d)", tfidf_matrix.shape, num_features)
 
     lsh = _LSHIndex(num_features=num_features)
+    lsh.vectorizer = vectorizer  # keep for query_string() at runtime
 
     # 3. Index vectors into NearPy
     for i, nid in enumerate(nids):
@@ -135,8 +148,7 @@ def build_schema_sim_relation(
             network.add_relation(nid, r_nid, Relation.SCHEMA_SIM, score)
             edges_added += 1
 
-    # tfidf_matrix and vectorizer no longer needed — free before returning
-    del tfidf_matrix, vectorizer
+    del tfidf_matrix
     gc.collect()
 
     log.info("  schema_sim: added %d SCHEMA_SIM edges across %d fields", edges_added, len(nids))

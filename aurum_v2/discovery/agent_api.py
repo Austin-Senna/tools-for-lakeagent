@@ -100,9 +100,14 @@ class AgentAPI:
     ) -> list[dict]:
         """Find columns/tables whose *name* matches ``query``.
 
-        Combines attribute search (column names) and table search
-        (source names), deduplicates, and returns the top results
-        sorted by score.
+        Combines three sources in priority order:
+        1. FTS attribute search (column names)
+        2. FTS table search (source names)
+        3. LSH schema-similarity search (TF-IDF cosine, if index is loaded)
+
+        FTS hits carry their relevance scores. LSH hits that aren't already
+        in the FTS results are appended with score=0 (they matched by semantic
+        similarity, not verbatim keyword).
 
         Parameters
         ----------
@@ -126,6 +131,18 @@ class AgentAPI:
                 if d["nid"] not in seen:
                     seen.add(d["nid"])
                     results.append(d)
+
+        # LSH schema-similarity: append novel hits not found by FTS
+        for lsh_hit in self._api.search_schema_sim(query, top_k):
+            nid = lsh_hit["nid"]
+            if nid not in seen:
+                seen.add(nid)
+                results.append({
+                    "nid": nid,
+                    "table": lsh_hit["source"],
+                    "column": lsh_hit["field"],
+                    "score": 0.0,
+                })
 
         results.sort(key=lambda x: x["score"], reverse=True)
         if dedup_tables:
