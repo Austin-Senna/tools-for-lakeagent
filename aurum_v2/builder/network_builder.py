@@ -11,12 +11,15 @@ Algorithms and thresholds are identical to the legacy
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 from sklearn.feature_extraction.text import TfidfVectorizer
 from typing import Iterable
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 from datasketch import MinHashLSH, MinHash  # type: ignore[import-untyped]
 from nearpy import Engine  # type: ignore[import-untyped]
 from nearpy.distances import CosineDistance  # type: ignore[import-untyped]
@@ -91,57 +94,46 @@ def build_schema_sim_relation(
     # 1. Safely unpack tuples to guarantee nids and docs are perfectly aligned
     fields_list = list(fields)
     if not fields_list:
+        log.warning("build_schema_sim_relation: no fields provided, skipping")
         return _LSHIndex(num_features=0)
-        
+
     nids, docs = zip(*fields_list)
+    log.debug("  schema_sim: %d fields to process (max_degree=%d)", len(nids), max_degree)
 
     # 2. Compute TF-IDF Matrix
-    # (Replaces the legacy da.get_tfidf_docs call to keep dependencies standard)
     vectorizer = TfidfVectorizer()
     tfidf_matrix = vectorizer.fit_transform(docs)
-    
     num_features = tfidf_matrix.shape[1]
+    log.debug("  schema_sim: TF-IDF matrix shape=%s (vocab size=%d)", tfidf_matrix.shape, num_features)
+
     lsh = _LSHIndex(num_features=num_features)
 
-    # 3. Index vectors into NearPy and cache dense arrays
-    dense_vectors: list[np.ndarray] = []
+    # 3. Index vectors into NearPy
     for i, nid in enumerate(nids):
         vec = tfidf_matrix[i].todense().A[0]
-        dense_vectors.append(vec)
         lsh.index(vec, nid)
+    log.debug("  schema_sim: indexed %d vectors into LSH", len(nids))
 
-    # 3b. Rarity penalty — penalise ubiquitous column names (e.g. "Id" × 13)
-    #     so they don't all saturate at 1.0.
-    #     rarity(nid) = 1 / log2(1 + count_of_columns_with_same_name)
-    # from collections import Counter
-    # name_counts = Counter(docs)
-    # nid_rarity: dict[str, float] = {}
-    # for nid_val, doc in zip(nids, docs):
-        # nid_rarity[nid_val] = 1.0 / math.log2(1 + name_counts[doc])
-
-    # 4. Query and connect nodes (reuse cached dense vectors)
+    # 4. Query and connect nodes
+    edges_added = 0
     for i, nid in enumerate(nids):
-        neighbors = lsh.query(dense_vectors[i])
-        
-        top_k_edges = []
+        query_vec = tfidf_matrix[i].todense().A[0]
+        neighbors = lsh.query(query_vec)
 
-        # NearPy returns a list of (data, key, distance)
+        top_k_edges = []
         for _, r_nid, distance in neighbors:
             if nid != r_nid:
-                # Cosine similarity × geometric mean of rarity penalties
-                # cosine_sim = 1.0 - distance
-                # rarity = math.sqrt(nid_rarity[nid] * nid_rarity[r_nid])
-                # score = round(cosine_sim * rarity, 4)
                 score = 1.0
                 if len(top_k_edges) < max_degree:
                     heapq.heappush(top_k_edges, (score, r_nid))
-                # elif score > top_k_edges[0][0]:
-                #     heapq.heappop(top_k_edges)
-                #     heapq.heappush(top_k_edges, (score, r_nid))
+                else:
+                    break
 
         for score, r_nid in top_k_edges:
             network.add_relation(nid, r_nid, Relation.SCHEMA_SIM, score)
+            edges_added += 1
 
+    log.info("  schema_sim: added %d SCHEMA_SIM edges across %d fields", edges_added, len(nids))
     return lsh
 
 
@@ -215,17 +207,19 @@ def build_content_sim_mh_text(
     num_perm = config.minhash_num_perm if config else 512
     max_degree = config.max_degrees if config else 500
 
+    log.debug("  content_sim_text: threshold=%.2f, num_perm=%d, max_degree=%d",
+              threshold, num_perm, max_degree)
+
     lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
     minhashes = {}
-    mh_sig_obj = []
 
     # 1. Reconstruct MinHash objects from the raw arrays and index them
     for nid, sig_array in mh_signatures:
-        # Datasketch requires the numpy array of hash values
         m = MinHash(num_perm=num_perm, hashvalues=np.array(sig_array, dtype=np.uint64))
         lsh.insert(nid, m)
         minhashes[nid] = m
-        mh_sig_obj.append((nid, m))
+
+    log.debug("  content_sim_text: indexed %d MinHash signatures", len(minhashes))
 
     edges_added = 0
     pruned_hubs = 0
@@ -237,17 +231,14 @@ def build_content_sim_mh_text(
 
         for r_nid in neighbors:
             if r_nid != nid:
-                # Calculate the ACTUAL Jaccard similarity to give the edge a real weight
-                r_mh_obj = minhashes[r_nid]
-                score = m.jaccard(r_mh_obj)
-
+                score = m.jaccard(minhashes[r_nid])
                 if score >= threshold:
                     if len(top_neighbors) < max_degree:
                         heapq.heappush(top_neighbors, (score, r_nid))
                     elif score > top_neighbors[0][0]:
                         heapq.heappop(top_neighbors)
                         heapq.heappush(top_neighbors, (score, r_nid))
-        
+
         if len(neighbors) > max_degree:
             pruned_hubs += 1
 
@@ -255,7 +246,8 @@ def build_content_sim_mh_text(
             network.add_relation(nid, r_nid, Relation.CONTENT_SIM, round(score, 4))
             edges_added += 1
 
-    print(f"CONTENT_SIM (Text) complete. Added {edges_added} edges. Pruned {pruned_hubs} massive hubs.")
+    log.info("  content_sim_text: added %d CONTENT_SIM edges; pruned %d oversized hubs",
+             edges_added, pruned_hubs)
     return lsh
 
 # ======================================================================
@@ -384,6 +376,9 @@ def build_content_sim_relation_num_overlap_distr(
     inc_dep_th = config.inclusion_dep_th if config and hasattr(config, 'inclusion_dep_th') else 0.3
     dbscan_eps = config.dbscan_eps if config and hasattr(config, 'dbscan_eps') else 0.1
 
+    log.debug("  content_sim_num: overlap_th=%.2f, inc_dep_th=%.2f, dbscan_eps=%.2f, max_degree=%d",
+              overlap_th, inc_dep_th, dbscan_eps, max_degree)
+
     def compute_overlap(ref_left: float, ref_right: float, left: float, right: float) -> float:
         ref_width = ref_right - ref_left
         if ref_width == 0:
@@ -400,32 +395,33 @@ def build_content_sim_relation_num_overlap_distr(
         x_right = c_median + c_iqr
         domain = x_right - x_left
         entries.append((domain, nid, c_min, x_left, x_right, c_max))
-        
+
     entries.sort(reverse=True, key=lambda x: x[0])
     single_points = []
-    
-    # Trackers for the Hairball Killer
+
     degree_tracker = defaultdict(int)
     pruned_hubs = 0
+    content_edges = 0
+    inclusion_edges = 0
+
+    log.debug("  content_sim_num: %d numeric column entries to compare", len(entries))
 
     for ref_domain, ref_nid, ref_min, ref_left, ref_right, ref_max in entries:
-
         if ref_domain == 0:
-            single_points.append((ref_nid, ref_left)) 
+            single_points.append((ref_nid, ref_left))
             continue
-        
+
         top_content_sim = []
         top_inclusion = []
 
         for cand_domain, cand_nid, cand_min, cand_left, cand_right, cand_max in entries:
             if cand_nid == ref_nid or cand_domain == 0:
                 continue
-            
+
             ratio = cand_domain / ref_domain
-            # FIX: Only break if it drops below the LOWEST threshold (inc_dep_th)
             if ratio < inc_dep_th:
                 break
-            
+
             actual_overlap = compute_overlap(ref_left, ref_right, cand_left, cand_right)
 
             # 1. Content Similarity Check (Requires 85%)
@@ -437,69 +433,73 @@ def build_content_sim_relation_num_overlap_distr(
                     heapq.heappush(top_content_sim, (actual_overlap, cand_nid))
 
             # 2. Inclusion Dependency Check (Requires 30% + Min/Max containment)
-            # Notice we check this independently now so it doesn't get skipped!
             if not (math.isinf(ref_min) or math.isinf(ref_max) or math.isinf(cand_min) or math.isinf(cand_max)):
                 if cand_min >= ref_min and cand_max <= ref_max:
-                    if cand_min >= 0: # Only positive numbers
+                    if cand_min >= 0:
                         if actual_overlap >= inc_dep_th:
                             if len(top_inclusion) < max_degree:
                                 heapq.heappush(top_inclusion, (actual_overlap, cand_nid))
                             elif actual_overlap > top_inclusion[0][0]:
                                 heapq.heappop(top_inclusion)
                                 heapq.heappush(top_inclusion, (actual_overlap, cand_nid))
-        
+
         for actual_overlap, cand_nid in top_content_sim:
             network.add_relation(cand_nid, ref_nid, Relation.CONTENT_SIM, round(actual_overlap, 4))
             degree_tracker[ref_nid] += 1
             degree_tracker[cand_nid] += 1
+            content_edges += 1
 
         for actual_overlap, cand_nid in top_inclusion:
             network.add_relation(cand_nid, ref_nid, Relation.INCLUSION_DEPENDENCY, 1.0)
             degree_tracker[ref_nid] += 1
             degree_tracker[cand_nid] += 1
+            inclusion_edges += 1
 
     # Final clustering for single points (Domain == 0)
+    dbscan_edges = 0
     if single_points:
+        log.debug("  content_sim_num: clustering %d single-point (zero-IQR) columns with DBSCAN",
+                  len(single_points))
         fields = [pt[0] for pt in single_points]
         medians = np.array([[pt[1]] for pt in single_points])
 
         db_median = DBSCAN(eps=dbscan_eps, min_samples=2).fit(medians)
-        
+
         clusters = defaultdict(list)
         for idx, label in enumerate(db_median.labels_):
             if label != -1:
                 clusters[label].append((fields[idx], medians[idx][0]))
 
+        log.debug("  content_sim_num: DBSCAN found %d clusters from %d single-point columns",
+                  len(clusters), len(single_points))
+
         for cluster_nodes in clusters.values():
-            # Apply hairball killer to DBSCAN clusters too
             if len(cluster_nodes) > max_degree:
                 pruned_hubs += 1
-                continue 
-                
+                continue
+
             for i in range(len(cluster_nodes)):
                 for j in range(i + 1, len(cluster_nodes)):
                     nid_i, med_i = cluster_nodes[i]
                     nid_j, med_j = cluster_nodes[j]
-                    
-                    # 1. Calculate the spatial distance between the two single points
+
                     dist = abs(med_i - med_j)
-                    
-                    # 2. Map the distance [0, eps] to a score [1.0, overlap_th]
                     if dbscan_eps == 0 or dist == 0:
                         actual_score = 1.0
                     else:
                         actual_score = 1.0 - ((dist / dbscan_eps) * (1.0 - overlap_th))
-                        
-                    # 3. Clamp the score just to be safe from floating point weirdness
+
                     actual_score = round(max(overlap_th, min(1.0, actual_score)), 4)
 
-                    # 4. Add the edge using the computed actual score
                     network.add_relation(nid_i, nid_j, Relation.CONTENT_SIM, actual_score)
                     network.add_relation(nid_j, nid_i, Relation.CONTENT_SIM, actual_score)
-                    # network.add_relation(cluster_nodes[i], cluster_nodes[j], Relation.CONTENT_SIM, overlap_th)
-                    # network.add_relation(cluster_nodes[j], cluster_nodes[i], Relation.CONTENT_SIM, overlap_th)
+                    dbscan_edges += 2
 
-    print(f"Numeric builder complete. Pruned {pruned_hubs} generic numeric super-hubs.")
+    log.info(
+        "  content_sim_num: added %d CONTENT_SIM + %d INCLUSION_DEPENDENCY + %d DBSCAN edges; "
+        "pruned %d oversized hubs",
+        content_edges, inclusion_edges, dbscan_edges, pruned_hubs,
+    )
 
 # ======================================================================
 # 4. Primary‑key / foreign‑key relation
@@ -518,11 +518,12 @@ def build_pkfk_relation(
     2. For each neighbour *ne*, add a ``PKFK`` edge scored as
        ``max(card_n, card_ne)``.
     """
-    # 1. Fetch configurations or use defaults
-    cardinality_th = config.pkfk_cardinality_th if config and hasattr(config, 'pkfk_cardinality_th') else 0.7
+    cardinality_th = (
+        config.pkfk_cardinality_th if config and hasattr(config, 'pkfk_cardinality_th') else 0.7
+    )
+    log.debug("  pkfk: cardinality_th=%.2f", cardinality_th)
 
     def get_neighborhood(nid: str):
-        """Helper to fetch candidate neighbors based on column data type."""
         data_type = network.get_data_type_of(nid)
         if data_type == "N":
             return network.neighbors_id(nid, Relation.INCLUSION_DEPENDENCY)
@@ -530,22 +531,23 @@ def build_pkfk_relation(
             return network.neighbors_id(nid, Relation.CONTENT_SIM)
         return []
 
-    # 2. Scan the network for Primary Key candidates
+    pk_candidates = 0
+    edges_added = 0
+
     for n in network.iterate_ids():
         n_card = network.get_cardinality_of(n)
-        
-        # A valid PK candidate must have high uniqueness (cardinality)
+
         if n_card > cardinality_th:
+            pk_candidates += 1
             neighbors = get_neighborhood(n)
-            
+
             for ne in neighbors:
-                # Safely handle the neighbor object depending on network's return type
                 ne_nid = ne.nid if hasattr(ne, 'nid') else ne
-                
+
                 if ne_nid != n:
-                    # Calculate the edge score based on the highest cardinality
                     ne_card = network.get_cardinality_of(ne_nid)
                     highest_card = max(n_card, ne_card)
-                    
-                    # Add the directional PKFK relationship
                     network.add_relation(n, ne_nid, Relation.PKFK, highest_card)
+                    edges_added += 1
+
+    log.info("  pkfk: %d PK candidates found; added %d PKFK edges", pk_candidates, edges_added)

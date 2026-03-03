@@ -50,7 +50,7 @@ class AurumConfig:
 
     # ── Read limits ──────────────────────────────────────────────
     limit_values: bool = False
-    max_values: int = 10000
+    max_values: int = 20000
     """Max values stored per column in the keyword search index."""
     max_file_size_gb: float = 10.0
     """S3 files larger than this (in GB) are skipped entirely."""

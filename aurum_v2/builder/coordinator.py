@@ -16,6 +16,7 @@ Direct port of ``networkbuildercoordinator.py``.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
     from aurum_v2.store.elastic_store import ElasticStore
 
 __all__ = ["build_network"]
+
+log = logging.getLogger(__name__)
 
 
 def build_network(
@@ -55,6 +58,9 @@ def build_network(
     if duck is None and es is None:
         raise ValueError("At least one store backend (duck or es) must be provided")
 
+    backend = "DuckDB" if duck is not None else "Elasticsearch"
+    log.info("Starting network build  [backend=%s, output=%s]", backend, output_path)
+
     # Use whichever store was provided (prefer duck for zero-infra)
     store = duck or es  # type: ignore[assignment]
     start_all = time.time()
@@ -62,12 +68,17 @@ def build_network(
     network = FieldNetwork()
 
     # ── Stage 1: Read all fields ──────────────────────────────────────
+    log.info("[1/7] Reading all fields from store …")
     fields_gen = store.get_all_fields()
 
     # ── Stage 2: Build skeleton ───────────────────────────────────────
+    log.info("[2/7] Building graph skeleton (meta-schema) …")
     _timed("meta_schema", lambda: network.init_meta_schema(fields_gen))
+    node_count = network.count_nodes()
+    log.info("      Skeleton complete — %d nodes in graph", node_count)
 
     # ── Stage 3: Schema similarity (TF‑IDF → NearPy LSH) ─────────────
+    log.info("[3/7] Building schema-similarity edges (TF-IDF + NearPy LSH) …")
     fields_name = store.get_all_fields_name()
     schema_sim_index = _timed(
         "schema_sim",
@@ -75,6 +86,7 @@ def build_network(
     )
 
     # ── Stage 4: Content similarity — text (MinHash LSH) ──────────────
+    log.info("[4/7] Building content-similarity edges — text (MinHash LSH) …")
     mh_sigs = store.get_all_mh_text_signatures()
     content_sim_index = _timed(
         "content_sim_text",
@@ -82,6 +94,7 @@ def build_network(
     )
 
     # ── Stage 5: Content similarity — numeric (overlap distr.) ────────
+    log.info("[5/7] Building content-similarity edges — numeric (distribution overlap) …")
     num_sigs = store.get_all_fields_num_signatures()
     _timed(
         "content_sim_num",
@@ -91,9 +104,11 @@ def build_network(
     )
 
     # ── Stage 6: PK / FK ─────────────────────────────────────────────
+    log.info("[6/7] Building PK/FK edges …")
     _timed("pkfk", lambda: network_builder.build_pkfk_relation(network, config))
 
     # ── Stage 7: Serialize ────────────────────────────────────────────
+    log.info("[7/7] Serializing network and LSH indexes to %s …", output_path)
     serialize_network(network, output_path)
     serialize_object(
         schema_sim_index, f"{output_path}/{config.schema_sim_index_filename}"
@@ -101,17 +116,19 @@ def build_network(
     serialize_object(
         content_sim_index, f"{output_path}/{config.content_sim_index_filename}"
     )
+    log.info("      Serialization complete")
 
     elapsed = time.time() - start_all
-    print(f"Network build complete.  Total time: {elapsed:.2f}s")
+    log.info("Network build complete. Total time: %.2fs", elapsed)
 
 
 # ── Timing helper ─────────────────────────────────────────────────────
 
 def _timed(label: str, fn):
-    """Run *fn*, print elapsed time, and return its result."""
+    """Run *fn*, log elapsed time, and return its result."""
+    log.debug("  -> starting stage: %s", label)
     start = time.time()
     result = fn()
     elapsed = time.time() - start
-    print(f"[{label}] {elapsed:.2f}s")
+    log.info("  [%s] done in %.2fs", label, elapsed)
     return result
