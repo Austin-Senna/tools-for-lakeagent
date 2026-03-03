@@ -54,6 +54,8 @@ class AurumConfig:
     """Max values stored per column in the keyword search index."""
     max_file_size_gb: float = 10.0
     """S3 files larger than this (in GB) are skipped entirely."""
+    tfidf_max_features: int = 10_000
+    """Max vocabulary size for TfidfVectorizer in schema similarity. Caps memory usage."""
 
     # ── DuckDB ─────────────────────────────────────────────────────────
     duckdb_path: str = "aurum.db"

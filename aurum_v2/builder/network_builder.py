@@ -11,6 +11,7 @@ Algorithms and thresholds are identical to the legacy
 
 from __future__ import annotations
 
+import gc
 import logging
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
@@ -89,7 +90,7 @@ def build_schema_sim_relation(
     Returns the :class:`_LSHIndex` so it can be serialised alongside the
     network artefacts.
     """
-    max_degree = config.max_degrees if config and hasattr(config, 'max_degrees') else 500
+    max_degree = config.max_degrees if config and hasattr(config, 'max_degrees') else 100
 
     # 1. Safely unpack tuples to guarantee nids and docs are perfectly aligned
     fields_list = list(fields)
@@ -101,7 +102,8 @@ def build_schema_sim_relation(
     log.debug("  schema_sim: %d fields to process (max_degree=%d)", len(nids), max_degree)
 
     # 2. Compute TF-IDF Matrix
-    vectorizer = TfidfVectorizer()
+    max_features = config.tfidf_max_features if config and hasattr(config, 'tfidf_max_features') else 10_000
+    vectorizer = TfidfVectorizer(max_features=max_features)
     tfidf_matrix = vectorizer.fit_transform(docs)
     num_features = tfidf_matrix.shape[1]
     log.debug("  schema_sim: TF-IDF matrix shape=%s (vocab size=%d)", tfidf_matrix.shape, num_features)
@@ -132,6 +134,10 @@ def build_schema_sim_relation(
         for score, r_nid in top_k_edges:
             network.add_relation(nid, r_nid, Relation.SCHEMA_SIM, score)
             edges_added += 1
+
+    # tfidf_matrix and vectorizer no longer needed — free before returning
+    del tfidf_matrix, vectorizer
+    gc.collect()
 
     log.info("  schema_sim: added %d SCHEMA_SIM edges across %d fields", edges_added, len(nids))
     return lsh
@@ -205,7 +211,7 @@ def build_content_sim_mh_text(
     """
     threshold = config.minhash_threshold if config else 0.7
     num_perm = config.minhash_num_perm if config else 512
-    max_degree = config.max_degrees if config else 500
+    max_degree = config.max_degrees if config else 100
 
     log.debug("  content_sim_text: threshold=%.2f, num_perm=%d, max_degree=%d",
               threshold, num_perm, max_degree)
@@ -245,6 +251,10 @@ def build_content_sim_mh_text(
         for score, r_nid in top_neighbors:
             network.add_relation(nid, r_nid, Relation.CONTENT_SIM, round(score, 4))
             edges_added += 1
+
+    # minhashes dict no longer needed after querying — free before returning
+    del minhashes
+    gc.collect()
 
     log.info("  content_sim_text: added %d CONTENT_SIM edges; pruned %d oversized hubs",
              edges_added, pruned_hubs)
@@ -371,7 +381,7 @@ def build_content_sim_relation_num_overlap_distr(
         O(N^2), but works more closely to O(N).
     """
     
-    max_degree = config.max_degrees if config and hasattr(config, 'max_degrees') else 500
+    max_degree = config.max_degrees if config and hasattr(config, 'max_degrees') else 100
     overlap_th = config.num_overlap_th if config and hasattr(config, 'num_overlap_th') else 0.85
     inc_dep_th = config.inclusion_dep_th if config and hasattr(config, 'inclusion_dep_th') else 0.3
     dbscan_eps = config.dbscan_eps if config and hasattr(config, 'dbscan_eps') else 0.1

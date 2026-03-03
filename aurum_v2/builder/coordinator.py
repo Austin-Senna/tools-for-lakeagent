@@ -16,6 +16,7 @@ Direct port of ``networkbuildercoordinator.py``.
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -74,8 +75,7 @@ def build_network(
     # ── Stage 2: Build skeleton ───────────────────────────────────────
     log.info("[2/7] Building graph skeleton (meta-schema) …")
     _timed("meta_schema", lambda: network.init_meta_schema(fields_gen))
-    node_count = network.count_nodes()
-    log.info("      Skeleton complete — %d nodes in graph", node_count)
+    log.info("      Skeleton complete — %d nodes in graph")
 
     # ── Stage 3: Schema similarity (TF‑IDF → NearPy LSH) ─────────────
     log.info("[3/7] Building schema-similarity edges (TF-IDF + NearPy LSH) …")
@@ -84,6 +84,11 @@ def build_network(
         "schema_sim",
         lambda: network_builder.build_schema_sim_relation(network, fields_name, config),
     )
+    # Serialize immediately and free — NearPy engine holds all vectors internally
+    serialize_object(schema_sim_index, f"{output_path}/{config.schema_sim_index_filename}")
+    del schema_sim_index
+    gc.collect()
+    log.info("      schema_sim_index serialized and freed")
 
     # ── Stage 4: Content similarity — text (MinHash LSH) ──────────────
     log.info("[4/7] Building content-similarity edges — text (MinHash LSH) …")
@@ -92,6 +97,11 @@ def build_network(
         "content_sim_text",
         lambda: network_builder.build_content_sim_mh_text(network, mh_sigs, config),
     )
+    # Serialize immediately and free — MinHashLSH holds all signatures internally
+    serialize_object(content_sim_index, f"{output_path}/{config.content_sim_index_filename}")
+    del content_sim_index
+    gc.collect()
+    log.info("      content_sim_index serialized and freed")
 
     # ── Stage 5: Content similarity — numeric (overlap distr.) ────────
     log.info("[5/7] Building content-similarity edges — numeric (distribution overlap) …")
@@ -108,14 +118,8 @@ def build_network(
     _timed("pkfk", lambda: network_builder.build_pkfk_relation(network, config))
 
     # ── Stage 7: Serialize ────────────────────────────────────────────
-    log.info("[7/7] Serializing network and LSH indexes to %s …", output_path)
+    log.info("[7/7] Serializing network to %s …", output_path)
     serialize_network(network, output_path)
-    serialize_object(
-        schema_sim_index, f"{output_path}/{config.schema_sim_index_filename}"
-    )
-    serialize_object(
-        content_sim_index, f"{output_path}/{config.content_sim_index_filename}"
-    )
     log.info("      Serialization complete")
 
     elapsed = time.time() - start_all
