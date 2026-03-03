@@ -112,7 +112,7 @@ def stage_profile(
     )
 
     profiler = Profiler(config)
-    profiler.run([reader], max_workers=max_workers)
+    profiler.run([reader], max_workers=max_workers, duck=duck)
 
     result = profiler.store_profiles(duck=duck)
     n = result.get("duckdb", 0)

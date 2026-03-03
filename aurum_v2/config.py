@@ -29,7 +29,7 @@ class AurumConfig:
     minhash_threshold: float = 0.7
     
     # --- Edge Limits ----------------
-    max_degrees: int = 200
+    max_degrees: int = 100
 
     # ── DBSCAN (single‑point numerical clustering) ─────────────────────
     dbscan_eps: float = 0.1
@@ -50,13 +50,17 @@ class AurumConfig:
 
     # ── Read limits ──────────────────────────────────────────────
     limit_values: bool = False
-    max_values: int = 20000
+    max_values: int = 10000
     """Max values stored per column in the keyword search index."""
     max_file_size_gb: float = 10.0
     """S3 files larger than this (in GB) are skipped entirely."""
 
     # ── DuckDB ─────────────────────────────────────────────────────────
     duckdb_path: str = "aurum.db"
+    duckdb_insert_chunk_size: int = 1_000
+    """Rows per executemany batch in bulk_insert_profiles."""
+    duckdb_flush_every: int = 10000
+    """Profile count threshold for mid-run streaming flushes to DuckDB."""
 
     # ── Serialisation paths ────────────────────────────────────────────
     graph_filename: str = "graph.pickle"

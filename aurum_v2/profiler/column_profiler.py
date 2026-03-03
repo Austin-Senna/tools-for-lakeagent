@@ -237,6 +237,7 @@ class Profiler:
     def __init__(self, config: AurumConfig) -> None:
         self._config = config
         self._profiles: list[ColumnProfile] = []
+        self._duck_streaming: bool = False  # True when run() streamed to DuckDB
 
     # ------------------------------------------------------------------
     # Profiling pipeline
@@ -247,22 +248,47 @@ class Profiler:
         readers: list[SourceReader],
         *,
         max_workers: int = 4,
+        duck: DuckStore | None = None,
+        flush_every: int | None = None,
     ) -> None:
         """Profile all columns from all *readers* using multiprocessing.
 
         Column profiling is CPU-bound (hashing, numeric stats) and runs in
         a ``ProcessPoolExecutor``.  The main thread collects results into
         ``self._profiles`` for subsequent storage.
+
+        Parameters
+        ----------
+        duck : DuckStore, optional
+            If provided, profiles are flushed to DuckDB every *flush_every*
+            columns during the run, keeping ``self._profiles`` small.
+            ``store_profiles`` will only write the remaining tail.
+        flush_every : int
+            How many completed profiles to accumulate before flushing to
+            DuckDB (default 1 000).
         """
         cfg = self._config
         MAX_QUEUE_SIZE = max_workers * 2
 
+        if duck is not None:
+            self._duck_streaming = True
+
+        threshold = flush_every if flush_every is not None else self._config.duckdb_flush_every
+
+        def _flush_if_needed(*, force: bool = False) -> None:
+            if duck is None:
+                return
+            if force or len(self._profiles) >= threshold:
+                duck.bulk_insert_profiles(self._profiles, rebuild_fts=False)
+                logger.info("Streamed %d profiles to DuckDB", len(self._profiles))
+                self._profiles.clear()
+
         with futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
             active_futures: set[futures.Future[ColumnProfile]] = set()
-            
+
             for reader in readers:
                 for db_name, table_name, col_name, aurum_type, values, path in reader.read_columns():
-                    
+
                     fut = executor.submit(
                         profile_column,
                         db_name=db_name,
@@ -274,12 +300,12 @@ class Profiler:
                         path=path,
                     )
                     active_futures.add(fut)
-                    
-                    # THROTTLE: If the queue is full, wait for at least one worker to finish 
+
+                    # THROTTLE: If the queue is full, wait for at least one worker to finish
                     # before pulling the next column from the generator.
                     if len(active_futures) >= MAX_QUEUE_SIZE:
                         done, active_futures = futures.wait(
-                            active_futures, 
+                            active_futures,
                             return_when=futures.FIRST_COMPLETED
                         )
                         for d in done:
@@ -287,6 +313,7 @@ class Profiler:
                                 self._profiles.append(d.result())
                             except Exception as e:
                                 logger.error("Worker failed: %s", e)
+                        _flush_if_needed()
 
             # CLEANUP: Drain whatever is left in the queue after the reader runs dry
             for fut in futures.as_completed(active_futures):
@@ -294,6 +321,13 @@ class Profiler:
                     self._profiles.append(fut.result())
                 except Exception as e:
                     logger.error("Worker failed during cleanup: %s", e)
+
+        # Flush any remaining profiles accumulated during cleanup
+        _flush_if_needed(force=True)
+
+        # Rebuild FTS once after all streaming inserts are done
+        if duck is not None and not self._profiles:
+            duck._rebuild_fts()
 
     # ------------------------------------------------------------------
     # Dual storage  (main-thread only)
@@ -326,12 +360,13 @@ class Profiler:
         """
         result: dict[str, int] = {}
 
-        if duck is not None:
-            n = duck.bulk_insert_profiles(
-                self._profiles
-            )
+        if duck is not None and not self._duck_streaming:
+            n = duck.bulk_insert_profiles(self._profiles)
             result["duckdb"] = n
             logger.info("Stored %d profiles to DuckDB", n)
+        elif duck is not None and self._duck_streaming:
+            # Profiles were already streamed during run(); just return the count.
+            result["duckdb"] = 0
 
         if es is not None:
             n = es.bulk_insert_profiles(

@@ -175,21 +175,27 @@ class DuckStore:
     def bulk_insert_profiles(
         self,
         profiles: list[ColumnProfile],
+        chunk_size: int | None = None,
+        *,
+        rebuild_fts: bool = True,
     ) -> int:
         """Insert profiles into ``profile`` and ``text_index`` tables.
 
         **Must be called from the main thread** — DuckDB only supports a
         single concurrent writer.
 
-        Uses DuckDB ``INSERT OR REPLACE`` via ``executemany`` for efficient
-        batched writes.
+        Inserts in *chunk_size* batches to keep RAM usage flat for large
+        profile lists.  Pass ``rebuild_fts=False`` when streaming incremental
+        flushes mid-run and call :meth:`_rebuild_fts` once at the end.
 
         Parameters
         ----------
         profiles : list[ColumnProfile]
             Column profiles gathered by the Profiler.
-        max_text_values : int
-            Max unique values stored per column in the text index.
+        chunk_size : int
+            Rows per ``executemany`` batch (default 1 000).
+        rebuild_fts : bool
+            Rebuild FTS indexes after inserting (default True).
 
         Returns
         -------
@@ -199,68 +205,80 @@ class DuckStore:
         if not profiles:
             return 0
 
-        profile_rows = []
-        text_rows = []
+        self._con.execute("PRAGMA preserve_insertion_order=false;")
 
-        for p in profiles:
-            profile_rows.append((
-                p.nid,
-                p.db_name,
-                getattr(p, "path", ""),
-                p.source_name,
-                p.column_name,
-                p.data_type,
-                p.total_values,
-                p.unique_values,
-                p.entities,
-                p.minhash,          # DuckDB BIGINT[] accepts list[int]
-                p.min_value,
-                p.max_value,
-                p.avg_value,
-                p.median,
-                p.iqr,
-            ))
+        batch = chunk_size if chunk_size is not None else self._config.duckdb_insert_chunk_size
+        total_profile_rows = 0
+        total_text_rows = 0
 
-            if p.data_type == "T" and p.raw_values:
-                unique_vals = list(dict.fromkeys(p.raw_values))
-                text_rows.append((
+        for i in range(0, len(profiles), batch):
+            chunk = profiles[i : i + batch]
+
+            profile_rows = []
+            text_rows = []
+
+            for p in chunk:
+                profile_rows.append((
                     p.nid,
                     p.db_name,
+                    getattr(p, "path", ""),
                     p.source_name,
                     p.column_name,
-                    " ".join(unique_vals),
+                    p.data_type,
+                    p.total_values,
+                    p.unique_values,
+                    p.entities,
+                    p.minhash,
+                    p.min_value,
+                    p.max_value,
+                    p.avg_value,
+                    p.median,
+                    p.iqr,
                 ))
 
-        self._con.execute("BEGIN TRANSACTION;")
-        try:
-            self._con.executemany(
-                """INSERT OR REPLACE INTO profile
-                   (nid, db_name, path, source_name, column_name, data_type,
-                    total_values, unique_values, entities, minhash,
-                    min_value, max_value, avg_value, median, iqr)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                profile_rows,
-            )
-            if text_rows:
-                self._con.executemany(
-                    """INSERT OR REPLACE INTO text_index
-                       (nid, db_name, source_name, column_name, text)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    text_rows,
-                )
-            self._con.execute("COMMIT;")
-        except Exception:
-            self._con.execute("ROLLBACK;")
-            raise
+                if p.data_type == "T" and p.raw_values:
+                    unique_vals = list(dict.fromkeys(p.raw_values))
+                    text_rows.append((
+                        p.nid,
+                        p.db_name,
+                        p.source_name,
+                        p.column_name,
+                        " ".join(unique_vals),
+                    ))
 
-        # Rebuild FTS after bulk load
-        self._rebuild_fts()
+            self._con.execute("BEGIN TRANSACTION;")
+            try:
+                self._con.executemany(
+                    """INSERT OR REPLACE INTO profile
+                       (nid, db_name, path, source_name, column_name, data_type,
+                        total_values, unique_values, entities, minhash,
+                        min_value, max_value, avg_value, median, iqr)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    profile_rows,
+                )
+                if text_rows:
+                    self._con.executemany(
+                        """INSERT OR REPLACE INTO text_index
+                           (nid, db_name, source_name, column_name, text)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        text_rows,
+                    )
+                self._con.execute("COMMIT;")
+            except Exception:
+                self._con.execute("ROLLBACK;")
+                raise
+
+            total_profile_rows += len(profile_rows)
+            total_text_rows += len(text_rows)
+
+        if rebuild_fts:
+            self._rebuild_fts()
 
         logger.info(
             "Inserted %d profile rows, %d text rows into DuckDB",
-            len(profile_rows), len(text_rows),
+            total_profile_rows, total_text_rows,
         )
-        return len(profile_rows)
+        return total_profile_rows
 
     # ==================================================================
     # Retrieval — used by network-building pipeline
